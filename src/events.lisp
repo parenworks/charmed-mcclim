@@ -48,8 +48,8 @@
       (cond
         ;; Resize
         ((eql code +key-resize+)
-         (multiple-value-bind (w h) (terminal-size)
-           (make-instance 'resize-event :width w :height h)))
+         (let ((size (terminal-size)))
+           (make-instance 'resize-event :width (first size) :height (second size))))
         ;; Mouse press
         ((eql code +key-mouse+)
          (make-instance 'pointer-button-event

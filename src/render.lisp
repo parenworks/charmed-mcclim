@@ -14,8 +14,8 @@
           (w (pane-width pane))
           (h (pane-height pane))
           (border-fg (if (pane-active-p pane)
-                         (make-named-color :green)
-                         (make-named-color :white))))
+                         (lookup-color :green)
+                         (lookup-color :white))))
       ;; Draw border if enabled
       (when (pane-border-p pane)
         (medium-draw-border medium x y w h

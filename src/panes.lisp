@@ -94,7 +94,7 @@
     (medium-fill-rect medium cx cy cw 1)
     ;; Write prompt + input
     (medium-write-string medium cx cy display
-                         :fg (make-named-color :green))
+                         :fg (lookup-color :green))
     ;; Position cursor
     (let ((scr (medium-screen medium))
           (cursor-x (+ cx (length prompt) (interactor-pane-cursor-pos p))))
@@ -199,13 +199,15 @@
   (let ((x (pane-x p))
         (y (pane-y p))
         (w (pane-width p))
-        (style (make-style :inverse t)))
+        (fg (lookup-color :black))
+        (bg (lookup-color :white))
+        (style (make-style :bold t)))
     ;; Fill background
-    (medium-fill-rect medium x y w 1 :style style)
+    (medium-fill-rect medium x y w 1 :fg fg :bg bg)
     ;; Write sections
     (let ((col x))
       (dolist (section (status-pane-sections p))
         (let ((text (format nil " ~A: ~A " (car section) (cdr section))))
           (when (<= (+ col (length text)) (+ x w))
-            (medium-write-string medium col y text :style style)
+            (medium-write-string medium col y text :fg fg :bg bg :style style)
             (incf col (length text))))))))

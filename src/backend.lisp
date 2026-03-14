@@ -19,6 +19,9 @@
 ;;; Backend
 ;;; ============================================================
 
+(defvar *current-backend* nil
+  "The currently running backend, bound during the main loop.")
+
 (defclass charmed-backend ()
   ((screen :accessor backend-screen :initform nil)
    (panes :initarg :panes :initform nil :accessor backend-panes)
@@ -34,10 +37,12 @@
 
 (defun backend-start (backend)
   "Initialize terminal and screen for the backend."
-  (enable-raw-mode)
+  (enable-raw-mode *terminal-mode*)
   (enable-mouse-tracking)
   (enable-resize-handling)
-  (multiple-value-bind (w h) (terminal-size)
+  (let* ((size (terminal-size))
+         (w (first size))
+         (h (second size)))
     (setf (backend-screen backend) (make-instance 'screen :width w :height h
                                                           :stream *terminal-io*))
     ;; Compute initial layout if frame has one
@@ -57,10 +62,10 @@
   (setf (backend-running-p backend) nil)
   (ignore-errors (disable-mouse-tracking))
   (ignore-errors (disable-resize-handling))
-  (ignore-errors (disable-raw-mode))
+  (ignore-errors (disable-raw-mode *terminal-mode*))
   (ignore-errors
     (reset)
-    (show-cursor)
+    (cursor-show)
     (leave-alternate-screen)
     (force-output *terminal-io*)))
 
@@ -138,9 +143,13 @@
 
 (defun backend-main-loop (backend)
   "Run the main event loop."
+  (let ((*current-backend* backend))
   (loop while (backend-running-p backend) do
     ;; Check for resize
-    (poll-resize)
+    (let ((resize-key (poll-resize)))
+      (when resize-key
+        (let ((event (translate-event resize-key)))
+          (when event (dispatch-event backend event)))))
     ;; Read input with timeout
     (let ((charmed-key (read-key-with-timeout 50)))
       (when charmed-key
@@ -148,7 +157,7 @@
           (when event
             (dispatch-event backend event)))))
     ;; Render dirty panes
-    (render-frame backend)))
+    (render-frame backend))))
 
 ;;; ============================================================
 ;;; Convenience Macro

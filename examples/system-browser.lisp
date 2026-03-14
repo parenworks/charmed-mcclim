@@ -135,8 +135,8 @@
                (medium-write-string medium cx row
                                     (format nil "~A~A" prefix display-name)
                                     :fg (if selected
-                                            (make-named-color :green)
-                                            (make-named-color :white))
+                                            (lookup-color :green)
+                                            (lookup-color :white))
                                     :style (when selected (make-style :bold t)))
                ;; Register as presentation
                (register-presentation pane
@@ -168,8 +168,8 @@
                                       (char= (char line 0) #\─))))
                    (medium-write-string medium (pane-content-x pane) row display
                                         :fg (if header-p
-                                                (make-named-color :cyan)
-                                                (make-named-color :white))
+                                                (lookup-color :cyan)
+                                                (lookup-color :white))
                                         :style (when header-p (make-style :bold t)))))))))
 
 ;;; ============================================================
@@ -220,67 +220,93 @@
           (list *browser-pane* *detail-pane* *interactor* *status*))))
 
 ;;; ============================================================
-;;; Browser Pane Event Handling
+;;; Pane Event Handling
 ;;; ============================================================
 
+(defun update-status ()
+  "Update status bar sections."
+  (setf (status-pane-sections *status*)
+        `(("Packages" . ,(length *packages*))
+          ("Selected" . ,(or *selected-package* "(none)"))
+          ("Tab" . "switch pane")
+          ("q" . "quit"))
+        (pane-dirty-p *status*) t))
+
+(defun detail-max-scroll ()
+  "Maximum scroll offset for detail pane."
+  (if *detail-lines*
+      (max 0 (- (length *detail-lines*) (pane-content-height *detail-pane*)))
+      0))
+
 (defmethod pane-handle-event ((pane application-pane) event)
-  "Handle keyboard navigation in the browser pane."
-  (when (and (typep event 'keyboard-event)
-             (eq pane *browser-pane*))
+  "Handle keyboard navigation in application panes."
+  (when (typep event 'keyboard-event)
     (let* ((key (keyboard-event-key event))
            (code (key-event-code key)))
       (cond
-        ;; Up
-        ((eql code +key-up+)
-         (when (> *selected-index* 0)
-           (select-package (1- *selected-index*))
-           ;; Adjust scroll
-           (when (< *selected-index* *scroll-offset*)
-             (setf *scroll-offset* *selected-index*))
-           (setf (pane-dirty-p *browser-pane*) t
-                 (pane-dirty-p *detail-pane*) t
-                 (status-pane-sections *status*)
-                 `(("Packages" . ,(length *packages*))
-                   ("Selected" . ,*selected-package*)
-                   ("Tab" . "switch pane")
-                   ("q" . "quit"))
-                 (pane-dirty-p *status*) t))
-         t)
-        ;; Down
-        ((eql code +key-down+)
-         (when (< *selected-index* (1- (length *packages*)))
-           (select-package (1+ *selected-index*))
-           ;; Adjust scroll
-           (let ((visible (pane-content-height *browser-pane*)))
-             (when (>= *selected-index* (+ *scroll-offset* visible))
-               (setf *scroll-offset* (- *selected-index* visible -1))))
-           (setf (pane-dirty-p *browser-pane*) t
-                 (pane-dirty-p *detail-pane*) t
-                 (status-pane-sections *status*)
-                 `(("Packages" . ,(length *packages*))
-                   ("Selected" . ,*selected-package*)
-                   ("Tab" . "switch pane")
-                   ("q" . "quit"))
-                 (pane-dirty-p *status*) t))
-         t)
-        ;; Enter - could drill into package
-        ((eql code +key-enter+)
-         t)
-        ;; Page up/down for detail
-        ((and (eq pane *detail-pane*) (eql code +key-page-up+))
-         (setf *detail-scroll* (max 0 (- *detail-scroll* (pane-content-height *detail-pane*)))
-               (pane-dirty-p *detail-pane*) t)
-         t)
-        ((and (eq pane *detail-pane*) (eql code +key-page-down+))
-         (when *detail-lines*
-           (setf *detail-scroll*
-                 (min (max 0 (- (length *detail-lines*) (pane-content-height *detail-pane*)))
-                      (+ *detail-scroll* (pane-content-height *detail-pane*)))
-                 (pane-dirty-p *detail-pane*) t))
-         t)
-        ;; q to quit (when not in interactor)
-        ((and (key-event-char key) (char= (key-event-char key) #\q))
-         nil)
+        ;; ── Browser pane ──
+        ((eq pane *browser-pane*)
+         (cond
+           ;; Up - previous package
+           ((eql code +key-up+)
+            (when (> *selected-index* 0)
+              (select-package (1- *selected-index*))
+              (when (< *selected-index* *scroll-offset*)
+                (setf *scroll-offset* *selected-index*))
+              (setf (pane-dirty-p *browser-pane*) t
+                    (pane-dirty-p *detail-pane*) t)
+              (update-status))
+            t)
+           ;; Down - next package
+           ((eql code +key-down+)
+            (when (< *selected-index* (1- (length *packages*)))
+              (select-package (1+ *selected-index*))
+              (let ((visible (pane-content-height *browser-pane*)))
+                (when (>= *selected-index* (+ *scroll-offset* visible))
+                  (setf *scroll-offset* (- *selected-index* visible -1))))
+              (setf (pane-dirty-p *browser-pane*) t
+                    (pane-dirty-p *detail-pane*) t)
+              (update-status))
+            t)
+           ;; Enter
+           ((eql code +key-enter+) t)
+           ;; q - quit
+           ((and (key-event-char key) (char= (key-event-char key) #\q))
+            (setf (backend-running-p *current-backend*) nil)
+            t)
+           (t nil)))
+        ;; ── Detail pane ──
+        ((eq pane *detail-pane*)
+         (cond
+           ;; Up - scroll up one line
+           ((eql code +key-up+)
+            (when (> *detail-scroll* 0)
+              (decf *detail-scroll*)
+              (setf (pane-dirty-p *detail-pane*) t))
+            t)
+           ;; Down - scroll down one line
+           ((eql code +key-down+)
+            (when (< *detail-scroll* (detail-max-scroll))
+              (incf *detail-scroll*)
+              (setf (pane-dirty-p *detail-pane*) t))
+            t)
+           ;; Page Up
+           ((eql code +key-page-up+)
+            (setf *detail-scroll* (max 0 (- *detail-scroll* (pane-content-height *detail-pane*)))
+                  (pane-dirty-p *detail-pane*) t)
+            t)
+           ;; Page Down
+           ((eql code +key-page-down+)
+            (setf *detail-scroll* (min (detail-max-scroll)
+                                       (+ *detail-scroll* (pane-content-height *detail-pane*)))
+                  (pane-dirty-p *detail-pane*) t)
+            t)
+           ;; q - quit
+           ((and (key-event-char key) (char= (key-event-char key) #\q))
+            (setf (backend-running-p *current-backend*) nil)
+            t)
+           (t nil)))
+        ;; Other application panes
         (t nil)))))
 
 ;;; ============================================================
@@ -321,4 +347,7 @@
   (let ((frame (make-instance 'application-frame
                                :title "System Browser"
                                :layout #'compute-layout)))
-    (run-frame frame)))
+    (run-frame frame))
+  #+sbcl (sb-ext:exit)
+  #+ccl (ccl:quit)
+  #+ecl (ext:quit))

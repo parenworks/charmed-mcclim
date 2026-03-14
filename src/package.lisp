@@ -11,6 +11,7 @@
    #:backend-panes
    #:backend-focused-pane
    #:backend-running-p
+   #:*current-backend*
    #:backend-start
    #:backend-stop
    #:backend-main-loop
