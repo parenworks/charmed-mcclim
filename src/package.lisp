@@ -127,6 +127,9 @@
    #:medium-apply-style-rect
    #:medium-set-style-rect
 
+   ;; Event dispatch
+   #:dispatch-event
+
    ;; Rendering
    #:render-frame
    #:render-pane

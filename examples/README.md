@@ -189,3 +189,115 @@ The object inspector demonstrates:
 - **MOP integration** — SBCL's MOP is used to enumerate CLOS instance slots
 - **Type-aware display** — different rendering for packages, symbols, lists, hash tables, CLOS objects, functions
 - **Three content panes** — history, slots, and detail working together
+
+---
+
+## Log Viewer
+
+A terminal log viewer with real-time tailing, colour-coded severity levels, filtering, and a demo mode that generates sample entries. Point it at any log file and it will parse timestamps, detect severity, highlight errors in red, warnings in yellow, info in green, and debug in dim white.
+
+It can also run standalone with no file — demo mode generates realistic log traffic from multiple fake components so you can try everything out immediately.
+
+### Running
+
+Demo mode (no file needed):
+
+```sh
+sbcl --eval '(ql:quickload :charmed-mcclim)' \
+     --eval '(load "examples/log-viewer.lisp")' \
+     --eval '(charmed-mcclim/log-viewer:run)'
+```
+
+View a real log file:
+
+```sh
+sbcl --eval '(ql:quickload :charmed-mcclim)' \
+     --eval '(load "examples/log-viewer.lisp")' \
+     --eval '(charmed-mcclim/log-viewer:view-file "/var/log/pacman.log")'
+```
+
+### Layout
+
+```
+┌─ Log ─────────────────────────────────────┐┌─ Detail ──────────────┐
+│ 10:30:45 [INF] [api]   Request processed  ││ ── Entry Detail ──    │
+│ 10:30:46 [WRN] [cache] Stale entry evict. ││                       │
+│ 10:30:47 [ERR] [db]    Connection refused  ││ Timestamp: ...        │
+│ 10:30:48 [DBG] [web]   Route matched       ││ Level:     ERROR      │
+│>10:30:49 [ERR] [auth]  Auth failed         ││ Source:    db         │
+│ 10:30:50 [INF] [sched] Task completed     ││                       │
+│ ...                                    ░░░││ ── Raw Line ──        │
+└────────────────────────────────────────────┘└───────────────────────┘
+┌─ Command ──────────────────────────────────────────────────────────┐
+│» filter auth                                                       │
+└────────────────────────────────────────────────────────────────────┘
+ Lines: 10805  Mode: TAIL  Tab: complete/focus  q: quit
+```
+
+- **Log** (left) — the main log view with colour-coded lines. A scrollbar on the right shows position. Selected line is highlighted with inverse.
+- **Detail** (right) — expanded info for the selected entry: timestamp, level, source, and raw line.
+- **Command** (bottom) — interactor for filter/level/tail commands with tab completion.
+
+### Colour Coding
+
+| Level | Colour | Style |
+|-------|--------|-------|
+| ERROR | Red | Bold |
+| WARN | Yellow | Normal |
+| INFO | Green | Normal |
+| DEBUG | White | Dim |
+
+### Navigation
+
+| Key | Context | Action |
+|-----|---------|--------|
+| ↑ / ↓ | Log pane (no selection) | Scroll one line |
+| ↑ / ↓ | Log pane (with selection) | Move selection up/down |
+| Page Up / Page Down | Log pane | Scroll one page |
+| Home | Log pane | Jump to top, pause auto-scroll |
+| End | Log pane | Jump to bottom, resume tailing |
+| Enter | Log pane | Select/deselect line for detail view |
+| Space | Log pane | Pause/resume auto-scroll |
+| f | Log pane | Cycle level filter: none → debug → info → warn → error → none |
+| t | Log pane | Toggle timestamp display |
+| s | Log pane | Toggle source label display |
+| Tab | Any pane | Cycle focus / complete command |
+| q | Log/Detail pane | Quit |
+| Ctrl-C / Ctrl-Q | Anywhere | Quit |
+
+### Commands
+
+| Command | Arguments | Description |
+|---------|-----------|-------------|
+| `filter <text>` | Search string | Show only lines matching text (case-insensitive) |
+| `clear-filter` | — | Remove all filters |
+| `level <level>` | debug/info/warn/error | Show only entries at or above severity |
+| `pause` | — | Toggle pause/resume auto-scroll |
+| `goto <n>` | Line number | Jump to a specific line |
+| `tail` | — | Jump to end and resume auto-scrolling |
+| `timestamps` | — | Toggle timestamp display |
+| `sources` | — | Toggle source label display |
+| `stats` | — | Show entry counts by level in detail pane |
+| `help` | — | List all commands |
+| `quit` | — | Exit the log viewer |
+
+### Timestamp Parsing
+
+The viewer auto-detects several timestamp formats:
+
+- **ISO 8601** — `2024-01-15T10:30:45`
+- **Syslog** — `Jan 15 10:30:45`
+- **Bracketed** — `[2024-01-15 10:30:45]`
+
+### Architecture
+
+The log viewer demonstrates:
+
+- **Custom main loop** — overrides `backend-main-loop` to poll for new log data every 50ms alongside keyboard input
+- **Real-time tailing** — incrementally reads new lines from files without re-reading
+- **Log parsing protocol** — `parse-log-line` detects level and extracts timestamps from raw text
+- **Demo generator** — produces realistic log traffic with weighted severity distribution
+- **Filtering** — text pattern and severity level filters with live update
+- **Scroll indicator** — proportional scrollbar drawn with block characters
+- **Multi-source** — `view-files` merges entries from multiple log files chronologically
+- **Colour-coded display** — severity mapped to terminal colours with bold/dim styling
