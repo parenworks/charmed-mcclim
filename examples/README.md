@@ -37,12 +37,14 @@ sbcl --eval '(ql:quickload :charmed-mcclim)' \
 
 | Key | Context | Action |
 |-----|---------|--------|
-| ↑ / ↓ | Packages pane | Select previous/next package |
+| ↑ / ↓ | Packages pane | Select previous/next package (highlights with inverse) |
+| Enter | Packages pane | Activate selected package presentation |
 | ↑ / ↓ | Detail pane | Scroll one line |
 | Page Up / Page Down | Detail pane | Scroll one page |
 | Tab | Packages/Detail pane | Cycle focus to next pane |
 | Tab | Command pane | Complete command name |
 | Enter | Command pane | Execute command |
+| Mouse click | Packages pane | Select and activate a package presentation |
 | q | Packages/Detail pane | Quit |
 | Ctrl-C / Ctrl-Q | Anywhere | Quit |
 
@@ -69,6 +71,6 @@ The system browser demonstrates:
 - **`status-pane`** — single-line status bar with key/value sections
 - **`command-table`** — named commands with argument specs, dispatch, and completion
 - **`define-command`** — macro for registering commands with documentation
-- **`presentations`** — package names registered as semantic regions
+- **`presentations`** — package names as interactive semantic regions with inverse highlight and click/Enter activation
 - **`*current-backend*`** — allows pane handlers to signal quit
 - **Layout function** — responsive pane positioning on resize

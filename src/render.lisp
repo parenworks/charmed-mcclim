@@ -3,6 +3,19 @@
 (in-package #:charmed-mcclim)
 
 ;;; ============================================================
+;;; Presentation Highlighting
+;;; ============================================================
+
+(defun highlight-presentation (medium presentation)
+  "Highlight a presentation by applying inverse style to its region."
+  (medium-apply-style-rect medium
+                           (presentation-x presentation)
+                           (presentation-y presentation)
+                           (presentation-width presentation)
+                           (presentation-height presentation)
+                           (make-style :inverse t)))
+
+;;; ============================================================
 ;;; Pane Rendering
 ;;; ============================================================
 

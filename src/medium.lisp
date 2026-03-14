@@ -98,6 +98,32 @@
       (when (and (> w 0) (> h 0))
         (screen-fill-rect scr x1 y1 w h :char char :fg fg :bg bg :style style)))))
 
+(defun medium-set-style-rect (medium x y width height style)
+  "Set STYLE on existing cells in a rectangle without changing content.
+   STYLE may be nil to clear style, or a text-style to apply.
+   This is used for presentation highlighting (inverse, underline, etc.)."
+  (let ((scr (medium-screen medium))
+        (cx (medium-clip-x medium))
+        (cy (medium-clip-y medium))
+        (cw (medium-clip-width medium))
+        (ch (medium-clip-height medium)))
+    ;; Compute intersection of rect with clip region
+    (let* ((x1 (max x cx))
+           (y1 (max y cy))
+           (x2 (min (+ x width) (if cw (+ cx cw) (1+ (screen-width scr)))))
+           (y2 (min (+ y height) (if ch (+ cy ch) (1+ (screen-height scr))))))
+      (when (and (< x1 x2) (< y1 y2))
+        (let ((back (screen-back scr)))
+          (loop for row from y1 below y2 do
+            (loop for col from x1 below x2 do
+              (let ((cell (buffer-get-cell back col row)))
+                (when cell
+                  (setf (cell-style cell) style))))))))))
+
+(defun medium-apply-style-rect (medium x y width height style)
+  "Apply STYLE to existing cells (alias for medium-set-style-rect)."
+  (medium-set-style-rect medium x y width height style))
+
 (defun medium-draw-border (medium x y width height &key fg bg title)
   "Draw a box border with optional title."
   (let ((scr (medium-screen medium)))

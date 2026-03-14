@@ -124,15 +124,16 @@
                                   (pointer-event-y event))))
       (when (and pane (not (eq pane (backend-focused-pane backend))))
         (focus-pane backend pane)))
-    ;; Also check presentation hit
-    (let ((focused (backend-focused-pane backend)))
-      (when focused
-        (let ((pres (hit-test focused
-                              (pointer-event-x event)
-                              (pointer-event-y event))))
-          (when pres
-            (activate-presentation pres)
-            (setf (pane-dirty-p focused) t)))))
+    ;; Only activate on press, not release
+    (when (eq (pointer-button-event-kind event) :press)
+      (let ((focused (backend-focused-pane backend)))
+        (when focused
+          (let ((pres (hit-test focused
+                                (pointer-event-x event)
+                                (pointer-event-y event))))
+            (when pres
+              (activate-presentation pres)
+              (setf (pane-dirty-p focused) t))))))
     nil))
 
 (defun dispatch-event (backend event)

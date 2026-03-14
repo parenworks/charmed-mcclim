@@ -132,22 +132,40 @@
                                      (subseq pkg-name 0 (- cw 2))
                                      pkg-name))
                    (prefix (if selected "> " "  ")))
-               (medium-write-string medium cx row
-                                    (format nil "~A~A" prefix display-name)
-                                    :fg (if selected
-                                            (lookup-color :green)
-                                            (lookup-color :white))
-                                    :style (when selected (make-style :bold t)))
+               (let ((text (format nil "~A~A" prefix display-name))
+                     (row-style (when selected (make-style :bold t :inverse t)))
+                     (row-fg (if selected
+                                 (lookup-color :green)
+                                 (lookup-color :white))))
+                 ;; Fill entire row with style first (for inverse background)
+                 (when selected
+                   (medium-fill-rect medium cx row cw 1
+                                     :fg row-fg :style row-style))
+                 (medium-write-string medium cx row text
+                                      :fg row-fg :style row-style)))
                ;; Register as presentation
-               (register-presentation pane
-                                      (make-presentation pkg-name 'package
-                                                         cx row cw
-                                                         :pane pane
-                                                         :action (lambda (p)
-                                                                   (select-package
-                                                                    (position (presentation-object p)
-                                                                              *packages*
-                                                                              :test #'string=)))))))))
+               (let ((pres (make-presentation pkg-name 'package
+                                              cx row cw
+                                              :pane pane
+                                              :action (lambda (p)
+                                                        (let ((idx (position (presentation-object p)
+                                                                             *packages*
+                                                                             :test #'string=)))
+                                                          (when idx
+                                                            (select-package idx)
+                                                            ;; Only scroll if selection is not visible
+                                                            (let ((visible (pane-content-height *browser-pane*)))
+                                                              (cond
+                                                                ((< idx *scroll-offset*)
+                                                                 (setf *scroll-offset* idx))
+                                                                ((>= idx (+ *scroll-offset* visible))
+                                                                 (setf *scroll-offset* (- idx visible -1)))))
+                                                            (setf (pane-dirty-p *browser-pane*) t
+                                                                  (pane-dirty-p *detail-pane*) t)
+                                                            (update-status)))))))
+                 (when selected
+                   (setf (presentation-focused-p pres) t))
+                 (register-presentation pane pres)))))
 
 (defun display-detail (pane medium)
   "Display package detail in the detail pane."
@@ -324,8 +342,15 @@
                     (pane-dirty-p *detail-pane*) t)
               (update-status))
             t)
-           ;; Enter
-           ((eql code +key-enter+) t)
+           ;; Enter - activate focused presentation
+           ((eql code +key-enter+)
+            (let ((pres (currently-focused-presentation pane)))
+              (when pres
+                (activate-presentation pres)
+                (setf (pane-dirty-p *browser-pane*) t
+                      (pane-dirty-p *detail-pane*) t)
+                (update-status)))
+            t)
            ;; q - quit
            ((and (key-event-char key) (char= (key-event-char key) #\q))
             (setf (backend-running-p *current-backend*) nil)

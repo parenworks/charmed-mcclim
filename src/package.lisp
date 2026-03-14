@@ -113,11 +113,19 @@
    #:presentation-height
    #:presentation-pane
    #:presentation-active-p
+   #:presentation-focused-p
+   #:presentation-action
    #:register-presentation
    #:clear-presentations
    #:hit-test
+   #:active-presentations
+   #:currently-focused-presentation
    #:focus-next-presentation
    #:focus-prev-presentation
+   #:activate-presentation
+   #:highlight-presentation
+   #:medium-apply-style-rect
+   #:medium-set-style-rect
 
    ;; Rendering
    #:render-frame
