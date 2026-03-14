@@ -18,5 +18,7 @@
                  (:file "focus")
                  (:file "commands")
                  (:file "presentations")
+                 (:file "forms")
+                 (:file "clim-proto")
                  (:file "render")
                  (:file "backend")))))

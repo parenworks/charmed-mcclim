@@ -49,10 +49,14 @@
 (defmacro define-command ((table-var name &key documentation) (&rest arg-clauses) &body body)
   "Define a command in a command table.
    TABLE-VAR is evaluated to get the command table.
-   NAME is a string naming the command.
+   NAME is a string or symbol naming the command.  If a symbol, its name is
+   downcased to produce the command string (CLIM-style).
    ARG-CLAUSES are ((name type &key prompt default) ...) or plain symbols.
    If DOCUMENTATION is nil, the first string in BODY is used."
-  (let* ((fn-name (gensym (format nil "CMD-~A-" name)))
+  (let* ((name-string (etypecase name
+                        (string name)
+                        (symbol (string-downcase (symbol-name name)))))
+         (fn-name (gensym (format nil "CMD-~A-" name-string)))
          (doc (or documentation
                   (when (stringp (first body)) (first body))))
          (parsed-args (mapcar (lambda (clause)
@@ -71,7 +75,7 @@
     `(progn
        (defun ,fn-name (,@parsed-args)
          ,@body)
-       (register-command ,table-var ,name #',fn-name
+       (register-command ,table-var ,name-string #',fn-name
                          ,doc
                          (list ,@arg-specs)))))
 

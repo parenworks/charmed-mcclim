@@ -301,3 +301,154 @@ The log viewer demonstrates:
 - **Scroll indicator** — proportional scrollbar drawn with block characters
 - **Multi-source** — `view-files` merges entries from multiple log files chronologically
 - **Colour-coded display** — severity mapped to terminal colours with bold/dim styling
+
+---
+
+## Form Editor
+
+A settings form editor that demonstrates the charmed-mcclim typed forms framework. It presents a panel of typed fields — strings, integers, floats, booleans, keywords, choices, and Lisp expressions — with validation, inline editing, multi-field form mode, and an activity log that shows every change as it happens.
+
+It also provides `edit-plist`, a utility that takes any flat property list and opens it as an editable form, returning the modified plist on exit.
+
+### Running
+
+```sh
+sbcl --eval '(ql:quickload :charmed-mcclim)' \
+     --eval '(load "examples/form-editor.lisp")' \
+     --eval '(charmed-mcclim/form-editor:run)'
+```
+
+To edit an arbitrary plist:
+
+```lisp
+(charmed-mcclim/form-editor:edit-plist '(:host "localhost" :port 3000 :debug t))
+```
+
+### Layout
+
+```
+┌─ Settings ─────────────────────────────┐┌─ Activity ──────────┐
+│ ✎ Username      =admin                 ││ Changed Port = 8080  │
+│ ✎ Email         =admin@example.com     ││ Changed Theme = dark │
+│ ✎ Port          =8080                  ││ Settings saved.      │
+│ ✎ Max workers   =4                     ││                      │
+│ ◆ Log level     =INFO                  ││                      │
+│ ◆ Theme         =dark                  ││                      │
+│ ☐ Debug mode    ·false                 ││                      │
+│ ☑ Verbose output·true                  ││                      │
+│ ☑ Auto-save     ·true                  ││                      │
+│ ✎ Timeout (sec) =30.0                  ││                      │
+│>✎ Database URL  =postgres://local...   ││                      │
+│ ✎ Tags          =(:WEB :API :PROD...)  ││                      │
+└─────────────────────────────────────────┘└──────────────────────┘
+ Fields: 12  Editable: 12  e: edit  E: form  Space: toggle  q: quit
+```
+
+### Navigation
+
+| Key | Context | Action |
+|-----|---------|--------|
+| ↑ / ↓ | Settings pane | Select previous/next field |
+| e | Settings pane | Edit the selected field inline |
+| E | Settings pane | Enter multi-field form mode (edit all at once) |
+| Space | Settings pane | Toggle boolean or cycle through choices |
+| Enter | Settings pane (editing) | Commit the edit |
+| Escape | Settings pane (editing) | Cancel editing |
+| Tab | Settings pane (form mode) | Move to next editable field |
+| ← → Home End | Settings pane (editing) | Move edit cursor |
+| ↑ / ↓ | Activity pane | Scroll log |
+| Tab | Any pane | Cycle focus |
+| q | Settings/Activity pane | Quit |
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `save` | Commit all form edits |
+| `reset` | Reset form to default values |
+| `show` | Print all current values to the activity log |
+| `help` | List available commands |
+| `quit` | Exit the form editor |
+
+### Architecture
+
+The form editor demonstrates:
+
+- **`typed-field`** — declaring fields with types, validators, choices, and required flags
+- **`make-typed-form`** — building a `form-pane-state` from a list of typed fields
+- **`display-form-pane`** — framework-rendered form with indicators, labels, values, cursors, and error bars
+- **`fps-handle-key`** — delegated keyboard handling for edit mode (buffer manipulation, commit, cancel)
+- **`fps-toggle-boolean` / `fps-cycle-choices`** — quick-action field operations
+- **`on-commit` / `on-change` callbacks** — reacting to form events
+- **`edit-plist`** — programmatic form construction from arbitrary data
+
+---
+
+## Command Palette
+
+A command palette / launcher with fuzzy filtering, shortcut keys, categorised commands, and action execution. Type to filter, press Enter to run a command, see the output in the right pane.
+
+### Running
+
+```sh
+sbcl --eval '(ql:quickload :charmed-mcclim)' \
+     --eval '(load "examples/command-palette.lisp")' \
+     --eval '(charmed-mcclim/command-palette:run)'
+```
+
+### Layout
+
+```
+┌─ Commands ──────────────────┐┌─ Output ──────────────────────┐
+│> Inspect Package        [p] ││ Implementation: SBCL 2.4.11   │
+│  List Packages          [P] ││ Machine: X86-64               │
+│  Room (Memory)          [m] ││ Software: Linux 6.x           │
+│  Lisp Features          [f] ││                               │
+│  ────────────────           ││                               │
+│  Eval (+ 1 2 3)            ││                               │
+│  Eval (values 1 2 3)       ││                               │
+│  Current Time           [t] ││                               │
+│  Random Number          [r] ││                               │
+│  ────────────────           ││                               │
+│  SBCL Version           [v] ││                               │
+│  Describe Symbol        [d] ││                               │
+│  Class Hierarchy: T     [c] ││                               │
+│  ────────────────           ││                               │
+│  Quit                   [q] ││                               │
+└─────────────────────────────┘└───────────────────────────────┘
+┌─ Filter ────────────────────────────────────────────────────┐
+│ 🔍 Type to filter...                                 15/15 │
+└─────────────────────────────────────────────────────────────┘
+ Category: System  Inspect Package  Enter: run  ↑↓: navigate  Esc: quit
+```
+
+### Navigation
+
+| Key | Context | Action |
+|-----|---------|--------|
+| ↑ / ↓ | Commands/Filter pane | Select previous/next command |
+| Enter | Commands/Filter pane | Execute selected command |
+| Any letter | Commands/Filter pane | Add to fuzzy filter |
+| Backspace | Commands/Filter pane | Delete last filter character |
+| Escape | Commands/Filter pane | Clear filter, or quit if empty |
+| ↑ / ↓ | Output pane | Scroll results |
+| Tab | Any pane | Cycle focus |
+
+### Features
+
+- **Fuzzy filtering** — type any substring to narrow the list (e.g. "pkg" matches "List Packages")
+- **Shortcut keys** — shown in brackets on the right; displayed but filtering takes priority
+- **Categories** — items are grouped with separators (System, Eval, Info)
+- **Action output** — results appear in the Output pane (memory stats, describe output, etc.)
+- **Match counter** — shows "5/15" when filtering narrows the list
+
+### Architecture
+
+The command palette demonstrates:
+
+- **`display-menu-pane`** — framework-rendered menu with selection highlighting, separators, and disabled items
+- **charmed `menu` / `menu-item`** — charmed's menu data model with labels, values, shortcuts, enabled/separator flags
+- **`menu-select-next` / `menu-select-prev`** — charmed's built-in navigation (skips separators and disabled items)
+- **Fuzzy matching** — custom filter that matches characters in order across the label
+- **Dynamic menu rebuilding** — filtering replaces the menu's item list and resets selection
+- **Action dispatch** — each menu item carries a closure that returns result lines

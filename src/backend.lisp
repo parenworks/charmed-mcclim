@@ -9,11 +9,33 @@
 (defclass application-frame ()
   ((title :initarg :title :initform "charmed-mcclim" :accessor frame-title)
    (panes :initarg :panes :initform nil :accessor frame-panes
-          :documentation "List of pane specifications")
+          :documentation "List of pane objects (flat list for backend)")
+   (named-panes :initform (make-hash-table :test 'eq) :accessor frame-named-panes
+                :documentation "Hash table mapping keyword names to pane objects")
    (command-table :initarg :command-table :initform nil :accessor frame-command-table)
    (layout :initarg :layout :initform nil :accessor frame-layout
-           :documentation "Function (lambda (frame width height)) that computes pane layout"))
+           :documentation "Function (lambda (backend width height)) that computes pane layout")
+   (state :initarg :state :initform nil :accessor frame-state
+          :documentation "Plist of application state")
+   (initializer :initarg :initializer :initform nil :accessor frame-initializer
+                :documentation "Function (lambda (frame)) called before main loop"))
   (:documentation "Application frame definition."))
+
+(defun frame-pane (frame name)
+  "Look up a named pane by keyword."
+  (gethash name (frame-named-panes frame)))
+
+(defun (setf frame-pane) (pane frame name)
+  "Register a pane under a keyword name."
+  (setf (gethash name (frame-named-panes frame)) pane))
+
+(defun frame-state-value (frame key)
+  "Get a value from the frame's state plist."
+  (getf (frame-state frame) key))
+
+(defun (setf frame-state-value) (value frame key)
+  "Set a value in the frame's state plist."
+  (setf (getf (frame-state frame) key) value))
 
 ;;; ============================================================
 ;;; Backend
@@ -194,3 +216,96 @@
   (with-backend (backend :frame frame
                          :command-table (frame-command-table frame))
     nil))
+
+;;; ============================================================
+;;; define-application-frame Macro
+;;; ============================================================
+
+(defmacro define-application-frame (name (&rest supers) slots
+                                    &body options)
+  "Define an application frame class with declarative pane, layout, command,
+   and state specifications.
+
+   Syntax:
+     (define-application-frame my-app ()
+       ((my-slot :initform 0 :accessor my-app-my-slot))
+       (:panes
+         (browser application-pane :title \"Browser\" :display-fn #'display-browser)
+         (cmd interactor-pane :title \"Command\" :prompt \"» \")
+         (bar status-pane))
+       (:layout compute-my-layout)
+       (:command-table my-commands)
+       (:state (:selected 0 :scroll 0 :filter nil))
+       (:default-initargs :title \"My App\"))
+
+   The macro generates:
+   - A CLOS class inheriting from APPLICATION-FRAME (plus SUPERS)
+   - A MAKE-<name>-PANES function that creates and registers named panes
+   - An initializer that calls MAKE-<name>-PANES
+   - Accessors for each named pane as FRAME-<name> (e.g. FRAME-BROWSER)"
+  (let* ((panes-spec (cdr (assoc :panes options)))
+         (layout-spec (cadr (assoc :layout options)))
+         (cmd-table-spec (cadr (assoc :command-table options)))
+         (state-spec (cadr (assoc :state options)))
+         (default-initargs (cdr (assoc :default-initargs options)))
+         (documentation (cadr (assoc :documentation options)))
+         (make-panes-fn (intern (format nil "MAKE-~A-PANES" name)))
+         (pane-accessor-forms
+           (loop for (pname ptype . pinitargs) in panes-spec
+                 for accessor-name = (intern (format nil "FRAME-~A" pname))
+                 collect `(defun ,accessor-name (frame)
+                            ,(format nil "Return the ~A pane from FRAME." pname)
+                            (frame-pane frame ,(intern (string pname) :keyword))))))
+    `(progn
+       ;; Define the frame class
+       (defclass ,name (,@(or supers '(application-frame)))
+         ,slots
+         ,@(when documentation
+             `((:documentation ,documentation)))
+         ,@(when default-initargs
+             `((:default-initargs ,@default-initargs))))
+
+       ;; Pane accessor functions
+       ,@pane-accessor-forms
+
+       ;; Pane creation function
+       (defun ,make-panes-fn (frame)
+         ,(format nil "Create and register panes for ~A." name)
+         (let ((all-panes nil))
+           ,@(loop for (pname ptype . pinitargs) in panes-spec
+                   for kw = (intern (string pname) :keyword)
+                   ;; Wire command-table from frame into interactor panes
+                   for effective-initargs =
+                     (if (subtypep ptype 'interactor-pane)
+                         (if (getf pinitargs :command-table)
+                             pinitargs
+                             `(:command-table (frame-command-table frame)
+                               ,@pinitargs))
+                         pinitargs)
+                   collect `(let ((p (make-instance ',ptype ,@effective-initargs)))
+                              (setf (frame-pane frame ,kw) p)
+                              (push p all-panes)))
+           (setf (frame-panes frame) (nreverse all-panes))))
+
+       ;; Define a method on INITIALIZE-INSTANCE :AFTER to wire everything
+       (defmethod initialize-instance :after ((frame ,name) &key)
+         ;; Set command table if specified and not already set
+         ,@(when cmd-table-spec
+             `((unless (frame-command-table frame)
+                 (setf (frame-command-table frame) ,cmd-table-spec))))
+         ;; Set layout if specified and not already set
+         ,@(when layout-spec
+             `((unless (frame-layout frame)
+                 (setf (frame-layout frame) #',layout-spec))))
+         ;; Initialize state
+         ,@(when state-spec
+             `((unless (frame-state frame)
+                 (setf (frame-state frame) (copy-list ',state-spec)))))
+         ;; Create panes
+         (,make-panes-fn frame)
+         ;; Call user initializer if present
+         (when (frame-initializer frame)
+           (funcall (frame-initializer frame) frame)
+           (setf (frame-initializer frame) nil)))
+
+       ',name)))

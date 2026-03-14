@@ -10,14 +10,18 @@ Built on `charmed`, a pure-Lisp ANSI terminal library with double-buffered rende
 
 ## Features
 
+- **`define-application-frame`** — declarative frame definition with named panes, state, layout, and commands
 - **Multi-pane layout** — application panes, interactor, status bar with automatic resize
-- **Command tables** — define, dispatch, and complete commands
+- **Command tables** — define, dispatch, and complete commands (string or symbol names)
 - **Presentations** — semantic objects mapped to screen regions, keyboard traversal, mouse activation
+- **CLIM protocol surface** — `present`/`accept`, presentation types, `accepting-values`
+- **Typed forms** — field type registry with parsing, validation, and medium-rendered editing
 - **Focus management** — Tab between panes, keyboard-first interaction
 - **Event system** — translates charmed terminal events to typed backend events
 - **Clipping medium** — all rendering clipped to pane bounds
 - **Double-buffered** — diff-based rendering via charmed's screen system
 - **Terminal restoration** — always cleans up on exit or crash
+- **136 unit tests** — commands, presentations, focus, forms, frame macro
 
 ## Quick Start
 
@@ -60,14 +64,18 @@ A multi-pane Common Lisp package browser that demonstrates:
 - [charmed](https://github.com/parenworks/charmed) — terminal substrate
 - [alexandria](https://gitlab.common-lisp.net/alexandria/alexandria) — utilities
 
-## Architecture
+## Documentation
 
-See [DESIGN.md](DESIGN.md) for the full design reference.
+- **[docs/API.md](docs/API.md)** — Complete API reference (frames, panes, commands, presentations, CLIM protocol, forms, focus, medium, events, backend)
+- **[DESIGN.md](DESIGN.md)** — Architecture and design rationale
+- **[examples/README.md](examples/README.md)** — Example walkthroughs
+
+## Architecture
 
 ```
 charmed (terminal + screen + widgets)
     ↓
-charmed-mcclim (presentations + commands + panes + focus)
+charmed-mcclim (frames + presentations + commands + panes + CLIM protocol)
     ↓
 your application
 ```

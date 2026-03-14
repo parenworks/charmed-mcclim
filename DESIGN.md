@@ -4,7 +4,7 @@
 **Author:** Glenn Thompson  
 **Project:** `charmed-mcclim`  
 **Language:** Common Lisp  
-**Status:** Pre-implementation reference  
+**Status:** Phases 1–5 complete; Phase 5a (frame macro, tests) complete  
 
 ---
 
@@ -682,86 +682,33 @@ Do not make Zellij the rendering backend. That is the wrong boundary.
 
 Since charmed already provides the terminal substrate and screen buffer (Phases 1-2 of the original roadmap), we start at the McCLIM integration layer.
 
-## Phase 1: Backend skeleton and single-pane rendering
+## Phase 1: Skeleton and single-pane rendering ✅
 
-**Goals:**
+Backend class with start/stop lifecycle, single application pane, event loop, clean exit.
 
-- Define backend, medium, and pane classes
-- Initialize charmed terminal + screen in backend-start
-- Render a single application pane with styled text
-- Handle keyboard input → dispatch to pane
-- Handle resize → relayout + redraw
-- Clean exit with terminal restoration
+## Phase 2: Multi-pane layout and focus ✅
 
-**Exit criteria:**
+Rectangular pane allocation with borders, Tab focus cycling, pane clipping, application/interactor/status panes, per-pane redraw invalidation.
 
-- Can launch a minimal frame
-- Can render styled text in a pane
-- Can accept keyboard input
-- Can exit cleanly
+## Phase 3: Command tables and interactor ✅
 
-## Phase 2: Multi-pane layout and focus
+Command table definition, dispatch from interactor, Tab completion, argument parsing, history navigation. Interactor logic inlined into `panes.lisp`.
 
-**Goals:**
+## Phase 4: Presentations ✅
 
-- Rectangular pane allocation with borders
-- Pane focus management (Tab cycles)
-- Pane clipping (each pane renders only within its bounds)
-- Application pane + interactor pane + status pane
-- Per-pane redraw invalidation
+Presentation regions, keyboard traversal, mouse hit-testing, activation on Enter/click, visual highlight, context actions.
 
-**Exit criteria:**
+## Phase 5: Forms, menus, and polish ✅
 
-- Multi-pane application works
-- Focus shifts correctly between panes
-- Only affected panes redraw on changes
+Typed field system with field type registry, form-pane-state with fps-* API, medium-based menu display, validation, form-mode editing. Six examples: system-browser, object-inspector, log-viewer, form-editor, command-palette, hello-frame.
 
-## Phase 3: Command tables and interactor
+## Phase 5a: Frame macro, tests, hardening ✅
 
-**Goals:**
-
-- Command table definition (name → function mapping)
-- Command dispatch from interactor pane
-- Command completion (Tab in interactor)
-- Command argument prompting
-- History navigation (up/down in interactor)
-
-**Exit criteria:**
-
-- Can define and invoke commands from the interactor
-- Tab completion works
-- Command history works
-
-## Phase 4: Presentations
-
-**Goals:**
-
-- Presentation region mapping (object + type + bounds)
-- Keyboard traversal between presentations (Tab/arrows within pane)
-- Mouse hit-testing against presentation bounds
-- Activation on Enter or click
-- Visual highlight of focused presentation (inverse/underline)
-- Context commands on presentations
-
-**Exit criteria:**
-
-- Inspector-like app exposes clickable/focusable semantic regions
-- Command-driven usage feels CLIM-like
-
-## Phase 5: Forms, menus, and polish
-
-**Goals:**
-
-- `accepting-values`-style form rendering (leveraging charmed's form widgets)
-- Menu interactions (leveraging charmed's menu system)
-- Text input fields (leveraging charmed's text-input widget)
-- Better style handling
-- Documentation and examples
-
-**Exit criteria:**
-
-- Useful terminal app demos exist
-- Backend is pleasant enough to dogfood
+- `define-application-frame` macro — declarative frame definition with named panes, layout, commands, state
+- Enriched `application-frame` — named-panes hash table, state plist, frame-pane/frame-state-value accessors
+- 136 unit tests covering commands, presentations, focus, forms, and frame (no terminal needed)
+- Found and fixed `fps-commit-all` bug (value not updated without setter)
+- Default mouse→presentation dispatch already in `handle-pointer`
 
 ## Phase 6 (optional): McCLIM bridge
 
@@ -787,21 +734,26 @@ charmed-mcclim/
 ├── README.md
 ├── charmed-mcclim.asd
 ├── src/
-│   ├── package.lisp       — package definition
-│   ├── backend.lisp       — backend class, lifecycle, main loop
+│   ├── package.lisp       — package definition and exports
+│   ├── backend.lisp       — backend class, lifecycle, main loop, define-application-frame
 │   ├── medium.lisp        — drawing medium (maps to charmed screen)
-│   ├── panes.lisp         — pane types and layout
-│   ├── focus.lisp         — focus management
-│   ├── events.lisp        — event translation (charmed → CLIM)
-│   ├── presentations.lisp — presentation regions, hit testing
-│   ├── commands.lisp      — command tables, dispatch, completion
-│   ├── interactor.lisp    — command input pane
+│   ├── panes.lisp         — pane types (application, interactor, status)
+│   ├── focus.lisp         — focus management and pane-at-position
+│   ├── events.lisp        — event translation (charmed → backend events)
+│   ├── presentations.lisp — presentation regions, hit testing, focus traversal
+│   ├── commands.lisp      — command tables, dispatch, completion, parsing
+│   ├── forms.lisp         — typed fields, form-pane-state, fps-* API, menu display
 │   └── render.lisp        — frame rendering orchestration
+├── tests/
+│   └── test-framework.lisp — 136 unit tests (commands, presentations, focus, forms, frame)
 ├── examples/
-│   ├── hello-frame.lisp   — minimal single-pane demo
-│   ├── inspector-demo.lisp — object inspector
-│   ├── menu-demo.lisp     — menu and command demo
-│   └── form-demo.lisp     — accepting-values style forms
+│   ├── README.md           — example documentation
+│   ├── hello-frame.lisp    — minimal demo using define-application-frame
+│   ├── system-browser.lisp — package/system explorer with presentations
+│   ├── object-inspector.lisp — CL object inspector with form editing
+│   ├── log-viewer.lisp     — live log viewer with filtering
+│   ├── form-editor.lisp    — form entry / accepting-values style demo
+│   └── command-palette.lisp — command palette / launcher with fuzzy search
 └── docs/
     └── (additional notes as needed)
 ```
