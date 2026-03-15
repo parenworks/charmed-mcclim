@@ -4,7 +4,7 @@
 **Author:** Glenn Thompson  
 **Project:** `charmed-mcclim`  
 **Language:** Common Lisp  
-**Status:** Phases 1–5a complete; Phase 6 (McCLIM backend) in progress — scrolling, clipping, focus cycling, and text cursor tracking working  
+**Status:** Phases 1–5a complete; Phase 6 (McCLIM backend) in progress — scrolling, clipping, focus cycling, text cursor tracking, text styles, color mapping, and event distribution bridge working  
 
 ---
 
@@ -1043,14 +1043,20 @@ are actually redrawn. Frames set this flag via:
 
 ### Event-driven repaint
 
-The `charmed-frame-top-level` event loop:
-1. Polls for charmed key events (50ms timeout)
-2. Dispatches Ctrl-Q as `frame-exit`
-3. Dispatches other keys via `charmed-handle-key-event` (generic function)
-4. Calls `redisplay-frame-panes` to repaint dirty panes
-5. Draws pane border separators
-6. Flushes screen via `port-force-output`
-7. Checks for terminal resize
+The `charmed-frame-top-level` event loop uses McCLIM's standard event path:
+1. Calls `process-next-event` with 50ms timeout — polls charmed input,
+   translates to McCLIM events, calls `distribute-event`
+2. `distribute-event :around` intercepts terminal-specific keys:
+   - Ctrl-Q → `frame-exit`
+   - Tab → `cycle-focus`
+   - Up/Down → `scroll-pane` ±1 line
+   - PgUp/PgDn → `scroll-pane` ±page
+3. Non-intercepted key events flow through to per-pane event queues
+   (available for `read-gesture` / `accept`)
+4. Drains queued events via `event-read-no-hang` on each pane
+5. Calls `pre-clear-dirty-panes` then `redisplay-frame-panes`
+6. `port-force-output` draws borders, positions cursor, and calls
+   `charmed:screen-present` to flush via diff
 
 ## Multi-Pane Infrastructure
 
@@ -1077,12 +1083,15 @@ McCLIM stores sheet children in reverse order — border drawing checks
 
 ### Key event dispatch
 
-`charmed-handle-key-event` is a generic function that frames specialize:
+`charmed-handle-key-event` is a generic function that receives McCLIM
+`key-press-event` objects (not raw charmed key-events). Frames specialize
+it to handle application-specific keys:
 
 ```lisp
 (defmethod clim-charmed:charmed-handle-key-event
-    ((frame my-frame) key)
-  ;; Handle key, mark panes for redisplay
+    ((frame my-frame) event focused-pane)
+  ;; event is a McCLIM key-press-event
+  ;; focused-pane is the pane currently holding keyboard focus
   (setf (pane-needs-redisplay (find-pane-named frame 'my-pane)) t))
 ```
 
@@ -1113,9 +1122,11 @@ The charmed backend integrates with this:
 
 McCLIM's `(setf port-keyboard-input-focus)` calls `note-input-focus-changed`
 on old and new sheets. `distribute-event` for `keyboard-event` routes to the
-focused sheet. Our backend uses `port-keyboard-input-focus` directly since
-we bypass McCLIM's event distribution (polling charmed events in the top-level
-loop instead).
+focused sheet. Our backend now uses McCLIM's standard event distribution path:
+`process-next-event` → `distribute-event` → per-pane event queues.
+Terminal-specific keys (Tab, arrows, PgUp/PgDn, Ctrl-Q) are intercepted in
+`distribute-event :around` via `charmed-intercept-key-event` before reaching
+the queue. All other key events pass through for `read-gesture` / `accept`.
 
 ## Scrolling and Viewport Clipping
 
@@ -1187,11 +1198,16 @@ terminal means 3 rows per line. The `adopt-frame :after` method sets
 
 ### Event loop integration
 
-The `charmed-frame-top-level` event loop handles:
+Terminal-specific keys are intercepted in `distribute-event :around` via
+`charmed-intercept-key-event`:
 
 - **Tab** — `cycle-focus` advances focus to next pane
 - **Up/Down** — scroll focused pane by 1 line
 - **PgUp/PgDn** — scroll focused pane by one viewport height
+- **Ctrl-Q** — `frame-exit` (quit)
+
+All other key events pass through to per-pane event queues, enabling
+McCLIM's `read-gesture`, `accept`, and command processing.
 
 ## Text Cursor Tracking
 
