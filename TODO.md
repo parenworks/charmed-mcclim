@@ -16,18 +16,13 @@
 - [x] Text cursor tracking (hardware cursor at stream-text-cursor position)
 - [x] Text style → terminal attribute mapping (bold, italic, dim, underline)
 - [x] Color mapping (resolve-ink for indirect-ink, over-compositum, masked-compositum; SGR 39/49 reset in charmed)
+- [x] McCLIM event distribution bridge (`process-next-event` → `distribute-event` → per-pane queues; Tab/arrows/PgUp/PgDn intercepted in `distribute-event :around`)
 
 ## In Progress
 
 (nothing currently in progress)
 
 ## Pending
-
-- [ ] **McCLIM event distribution bridge**
-  Currently we poll charmed events in the top-level loop and dispatch
-  manually. McCLIM's `distribute-event` / `dispatch-event` protocol is
-  bypassed. Needed for any McCLIM app that uses `read-gesture`, `accept`,
-  or McCLIM commands natively.
 
 - [ ] **Input editing / `accept`**
   McCLIM's input editor (the `accepting-values` / interactor prompt) needs

@@ -258,16 +258,82 @@ accumulating sheet-transformation offsets.  Stops at grafts."
 ;;; Custom frame top-level for charmed.
 ;;; Use as :top-level (charmed-frame-top-level) in define-application-frame.
 ;;; This runs inside run-frame-top-level :around which handles frame-exit.
-;;; Generic function called by the event loop for non-quit key events.
-;;; FOCUSED-PANE is the pane currently holding keyboard focus (may be NIL).
+;;; Generic function called by the event loop for key events that were not
+;;; consumed by distribute-event (i.e. not Ctrl-Q, Ctrl-Tab, PgUp/PgDn).
+;;; EVENT is a McCLIM key-press-event.  FOCUSED-PANE is the pane currently
+;;; holding keyboard focus (may be NIL).
 ;;; Frames can specialize this to handle input per-pane.
-(defgeneric charmed-handle-key-event (frame key focused-pane)
-  (:method ((frame application-frame) key focused-pane)
-    (declare (ignore key focused-pane))
+(defgeneric charmed-handle-key-event (frame event focused-pane)
+  (:method ((frame application-frame) event focused-pane)
+    (declare (ignore event focused-pane))
     nil))
 
+;;; Pre-clear screen areas for panes that need redisplay.
+;;; Must be called BEFORE redisplay-frame-panes so stale content is wiped.
+(defun pre-clear-dirty-panes (frame port)
+  "Clear the screen area of each pane that needs redisplay."
+  (let ((screen (charmed-port-screen port)))
+    (when screen
+      (dolist (p (collect-frame-panes frame))
+        (when (pane-needs-redisplay p)
+          (let ((vp (gethash p (charmed-port-viewport-sizes port))))
+            (when vp
+              (charmed:screen-fill-rect screen
+                                        (round (first vp))
+                                        (round (second vp))
+                                        (round (third vp))
+                                        (round (fourth vp))))))))))
+
+;;; Intercept terminal-specific keys during event distribution.
+;;; Tab cycles focus, Up/Down/PgUp/PgDn scroll — these are consumed here
+;;; and never reach the sheet's event queue.  All other key events pass
+;;; through to the normal McCLIM dispatch path (queue → read-gesture/accept).
+
+(defun charmed-intercept-key-event (port event)
+  "Handle charmed-specific key events.  Returns T if the event was consumed."
+  (let ((key-name (keyboard-event-key-name event))
+        (sheet (port-keyboard-input-focus port)))
+    (flet ((redisplay-and-present ()
+             (when sheet
+               (let ((frame (pane-frame sheet)))
+                 (when frame
+                   (pre-clear-dirty-panes frame port)
+                   (redisplay-frame-panes frame)
+                   (port-force-output port))))))
+      (cond
+        ;; Tab cycles focus
+        ((eql key-name :tab)
+         (when sheet
+           (let ((frame (pane-frame sheet)))
+             (when frame
+               (cycle-focus frame port)
+               (redisplay-and-present))))
+         t)
+        ;; Up/Down scroll by 1 line
+        ((eql key-name :up)
+         (when sheet (scroll-pane port sheet -1) (redisplay-and-present))
+         t)
+        ((eql key-name :down)
+         (when sheet (scroll-pane port sheet 1) (redisplay-and-present))
+         t)
+        ;; PgUp/PgDn scroll by page
+        ((eql key-name :prior)
+         (when sheet (scroll-pane port sheet (- (pane-height sheet))) (redisplay-and-present))
+         t)
+        ((eql key-name :next)
+         (when sheet (scroll-pane port sheet (pane-height sheet)) (redisplay-and-present))
+         t)
+        ;; Everything else passes through
+        (t nil)))))
+
 (defun charmed-frame-top-level (frame &key &allow-other-keys)
-  "Top-level loop for frames on the charmed terminal backend."
+  "Top-level loop for frames on the charmed terminal backend.
+   Events flow through McCLIM's standard distribution:
+   process-next-event → distribute-event → dispatch-event → queue.
+   Terminal-specific keys (Ctrl-Q, Ctrl-Tab, PgUp/PgDn) are intercepted
+   in distribute-event :around before reaching the queue.
+   Remaining events are read from the queue and dispatched to the frame
+   via charmed-handle-key-event."
   (let* ((fm (frame-manager frame))
          (port (port fm)))
     ;; Set initial focus to the first named pane
@@ -278,72 +344,28 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     (capture-pane-viewport-sizes frame port)
     ;; Initial display
     (redisplay-frame-panes frame :force-p t)
-    (draw-pane-borders frame port)
-    (update-terminal-cursor port)
     (port-force-output port)
-    ;; Event loop
+    ;; Event loop — pump events through McCLIM's standard distribution,
+    ;; then drain whatever reached each pane's event queue.
     (loop
-      ;; Poll charmed input
-      (let ((key (charmed:read-key-with-timeout 50)))
-        (when key
-          (let ((ch (charmed:key-event-char key))
-                (ctrl-p (charmed:key-event-ctrl-p key))
-                (code (charmed:key-event-code key))
-                (focused (port-keyboard-input-focus port)))
-            (cond
-              ;; Ctrl-Q signals frame-exit (caught by :around method)
-              ((and ctrl-p ch (char-equal ch #\q))
-               (frame-exit frame))
-              ;; Tab cycles focus between panes
-              ((eql code charmed:+key-tab+)
-               (cycle-focus frame port))
-              ;; Scroll: Up/Down by 1 line, PageUp/PageDown by page
-              ((eql code charmed:+key-up+)
-               (scroll-pane port focused -1))
-              ((eql code charmed:+key-down+)
-               (scroll-pane port focused 1))
-              ((eql code charmed:+key-page-up+)
-               (scroll-pane port focused (- (pane-height focused))))
-              ((eql code charmed:+key-page-down+)
-               (scroll-pane port focused (pane-height focused)))
-              ;; Dispatch other keys to the frame with focused pane
-              (t
-               (charmed-handle-key-event frame key focused))))))
-      ;; Clear each pane's screen area before redisplay so stale content
-      ;; (from previous scroll positions) doesn't persist.
-      (let ((screen (charmed-port-screen port))
-            (panes (collect-frame-panes frame)))
-        (when screen
-          (dolist (p panes)
-            (when (pane-needs-redisplay p)
-              (let ((vp (gethash p (charmed-port-viewport-sizes port))))
-                (when vp
-                  (let ((sx (round (first vp)))
-                        (sy (round (second vp)))
-                        (w  (round (third vp)))
-                        (h  (round (fourth vp))))
-                    (charmed:screen-fill-rect screen sx sy w h))))))))
-      ;; Redisplay any panes that need it
+      ;; Pump terminal input through process-next-event → distribute-event.
+      ;; Terminal-specific keys are consumed in distribute-event :around;
+      ;; everything else lands in the focused pane's event queue.
+      (process-next-event port :timeout 0.05)
+      ;; Drain queued events from all panes
+      (dolist (pane (collect-frame-panes frame))
+        (loop for event = (event-read-no-hang pane)
+              while event
+              do (cond
+                   ((typep event 'key-press-event)
+                    (charmed-handle-key-event frame event
+                                              (port-keyboard-input-focus port)))
+                   (t
+                    (handle-event (event-sheet event) event)))))
+      ;; Pre-clear and redisplay any panes that need it
+      (pre-clear-dirty-panes frame port)
       (redisplay-frame-panes frame)
-      (draw-pane-borders frame port)
-      (update-terminal-cursor port)
-      (port-force-output port)
-      ;; Check for resize
-      (let ((resize (charmed:poll-resize)))
-        (when resize
-          (let ((size (charmed:terminal-size))
-                (screen (charmed-port-screen port)))
-            (when screen
-              (charmed:screen-resize screen (first size) (second size)))
-            (let ((tls (frame-top-level-sheet frame)))
-              (when tls
-                (move-and-resize-sheet tls 0 0 (first size) (second size))
-                (layout-frame frame (first size) (second size))
-                (capture-pane-viewport-sizes frame port)
-                (redisplay-frame-panes frame :force-p t)
-                (draw-pane-borders frame port)
-                (update-terminal-cursor port)
-                (port-force-output port)))))))))
+      (port-force-output port))))
 
 ;;; Suppress space-requirements propagation for the charmed backend.
 ;;; Content expansion in stream panes must NOT trigger relayout, because:

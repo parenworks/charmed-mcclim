@@ -81,18 +81,23 @@
   ;; Check for resize
   (let ((resize-key (charmed:poll-resize)))
     (when resize-key
-      (let ((size (charmed:terminal-size)))
-        (let ((screen (charmed-port-screen port)))
-          (when screen
-            (charmed:screen-resize screen (first size) (second size))))
-        ;; Distribute a window-configuration event to the graft
-        (let ((g (first (climi::port-grafts port))))
-          (when g
-            (distribute-event port
-                              (make-instance 'window-configuration-event
-                                             :sheet g
-                                             :width (first size)
-                                             :height (second size)))))
+      (let* ((size (charmed:terminal-size))
+             (width (first size))
+             (height (second size))
+             (screen (charmed-port-screen port)))
+        (when screen
+          (charmed:screen-resize screen width height))
+        ;; Relayout all frames at the new terminal size
+        (let ((fm (first (slot-value port 'climi::frame-managers))))
+          (when fm
+            (dolist (frame (frame-manager-frames fm))
+              (let ((tls (frame-top-level-sheet frame)))
+                (when tls
+                  (move-and-resize-sheet tls 0 0 width height)
+                  (layout-frame frame width height)
+                  (capture-pane-viewport-sizes frame port)
+                  (redisplay-frame-panes frame :force-p t)
+                  (port-force-output port))))))
         (return-from process-next-event t))))
   ;; Read terminal input with timeout
   (let* ((timeout-ms (if timeout
@@ -249,19 +254,31 @@ first frame's top-level-sheet, or the graft."
 (defmethod port-force-output ((port charmed-port))
   (let ((screen (charmed-port-screen port)))
     (when screen
+      ;; Draw borders and position cursor before presenting
+      (let ((fm (first (slot-value port 'climi::frame-managers))))
+        (when fm
+          (let ((frames (frame-manager-frames fm)))
+            (when frames
+              (let ((frame (first frames)))
+                (draw-pane-borders frame port)
+                (update-terminal-cursor port))))))
       (charmed:screen-present screen))))
 
 (defmethod distribute-event :around ((port charmed-port) event)
-  ;; Intercept Ctrl-Q globally as a quit signal (backup for non-charmed-top-level frames)
-  (when (and (typep event 'key-press-event)
-             (eql (keyboard-event-key-name event) :|Q|)
-             (not (zerop (logand (event-modifier-state event) +control-key+))))
-    (let ((fm (first (slot-value port 'climi::frame-managers))))
-      (when fm
-        (let ((frames (frame-manager-frames fm)))
-          (when frames
-            (frame-exit (first frames))
-            (return-from distribute-event))))))
+  (when (typep event 'key-press-event)
+    ;; Intercept Ctrl-Q globally as a quit signal
+    (when (and (eql (keyboard-event-key-name event) :|Q|)
+               (not (zerop (logand (event-modifier-state event) +control-key+))))
+      (let ((fm (first (slot-value port 'climi::frame-managers))))
+        (when fm
+          (let ((frames (frame-manager-frames fm)))
+            (when frames
+              (frame-exit (first frames))
+              (return-from distribute-event)))))
+      (return-from distribute-event))
+    ;; Intercept terminal-specific keys (Ctrl-Tab, PgUp/PgDn)
+    (when (charmed-intercept-key-event port event)
+      (return-from distribute-event)))
   (call-next-method))
 
 (defmethod set-sheet-pointer-cursor ((port charmed-port) sheet cursor)
