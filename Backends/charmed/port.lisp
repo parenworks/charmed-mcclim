@@ -107,17 +107,29 @@
        (values nil :timeout)))))
 
 ;;; Translate a charmed key-event into a McCLIM event
+
+(defun find-event-sheet (port)
+  "Find the best sheet to target events at: the focused sheet, the
+first frame's top-level-sheet, or the graft."
+  (or (port-keyboard-input-focus port)
+      (let ((fm (first (slot-value port 'climi::frame-managers))))
+        (when fm
+          (let ((frames (frame-manager-frames fm)))
+            (when frames
+              (frame-top-level-sheet (first frames))))))
+      (first (climi::port-grafts port))))
+
 (defun translate-charmed-event (port charmed-key)
   "Translate a charmed key-event into a McCLIM standard-event."
   (let ((code (charmed:key-event-code charmed-key))
-        (graft (first (climi::port-grafts port))))
+        (sheet (find-event-sheet port)))
     (cond
       ;; Mouse press
       ((eql code charmed:+key-mouse+)
        (let ((x (charmed:key-event-mouse-x charmed-key))
              (y (charmed:key-event-mouse-y charmed-key)))
          (make-instance 'pointer-button-press-event
-                        :sheet graft
+                        :sheet sheet
                         :pointer (port-pointer port)
                         :button (translate-mouse-button
                                  (charmed:key-event-mouse-button charmed-key))
@@ -129,7 +141,7 @@
        (let ((x (charmed:key-event-mouse-x charmed-key))
              (y (charmed:key-event-mouse-y charmed-key)))
          (make-instance 'pointer-motion-event
-                        :sheet graft
+                        :sheet sheet
                         :pointer (port-pointer port)
                         :button 0
                         :x x :y y
@@ -140,7 +152,7 @@
        (let ((x (charmed:key-event-mouse-x charmed-key))
              (y (charmed:key-event-mouse-y charmed-key)))
          (make-instance 'pointer-button-release-event
-                        :sheet graft
+                        :sheet sheet
                         :pointer (port-pointer port)
                         :button (translate-mouse-button
                                  (charmed:key-event-mouse-button charmed-key))
@@ -159,7 +171,7 @@
                                       (if alt-p +meta-key+ 0))))
          (setf (charmed-port-modifier-state port) modifier-state)
          (make-instance 'key-press-event
-                        :sheet graft
+                        :sheet sheet
                         :key-name (translate-key-name code ch)
                         :key-character ch
                         :modifier-state modifier-state))))))
@@ -233,7 +245,16 @@
       (charmed:screen-present screen))))
 
 (defmethod distribute-event :around ((port charmed-port) event)
-  (declare (ignore event))
+  ;; Intercept Ctrl-Q globally as a quit signal (backup for non-charmed-top-level frames)
+  (when (and (typep event 'key-press-event)
+             (eql (keyboard-event-key-name event) :|Q|)
+             (not (zerop (logand (event-modifier-state event) +control-key+))))
+    (let ((fm (first (slot-value port 'climi::frame-managers))))
+      (when fm
+        (let ((frames (frame-manager-frames fm)))
+          (when frames
+            (frame-exit (first frames))
+            (return-from distribute-event))))))
   (call-next-method))
 
 (defmethod set-sheet-pointer-cursor ((port charmed-port) sheet cursor)

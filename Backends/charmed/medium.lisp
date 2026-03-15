@@ -66,22 +66,39 @@
 (defun ink-to-charmed-fg (ink)
   "Convert a CLIM ink to a charmed foreground color."
   (cond
-    ((eq ink +foreground-ink+)
-     nil)
-    ((eq ink +background-ink+)
-     nil)
+    ((eq ink +foreground-ink+) nil)
+    ((eq ink +background-ink+) nil)
+    ((eq ink +white+) nil)
+    ((eq ink +black+) nil)
     ((typep ink 'color)
      (multiple-value-bind (r g b) (color-rgb ink)
-       (charmed:make-rgb-color
-        (round (* r 255))
-        (round (* g 255))
-        (round (* b 255)))))
+       ;; Near-white or near-black → use terminal default
+       (if (or (and (> r 0.9) (> g 0.9) (> b 0.9))
+               (and (< r 0.1) (< g 0.1) (< b 0.1)))
+           nil
+           (charmed:make-rgb-color
+            (round (* r 255))
+            (round (* g 255))
+            (round (* b 255))))))
     (t nil)))
 
 (defun ink-to-charmed-bg (ink)
   "Convert a CLIM ink to a charmed background color."
-  (declare (ignore ink))
-  nil)
+  (cond
+    ((eq ink +foreground-ink+) nil)
+    ((eq ink +background-ink+) nil)
+    ((eq ink +white+) nil)
+    ((eq ink +black+) nil)
+    ((typep ink 'color)
+     (multiple-value-bind (r g b) (color-rgb ink)
+       (if (or (and (> r 0.9) (> g 0.9) (> b 0.9))
+               (and (< r 0.1) (< g 0.1) (< b 0.1)))
+           nil
+           (charmed:make-rgb-color
+            (round (* r 255))
+            (round (* g 255))
+            (round (* b 255))))))
+    (t nil)))
 
 ;;; Drawing operations
 
@@ -187,19 +204,20 @@
             (fg nil))
         (setf fg (ink-to-charmed-fg ink))
         (if filled
-            ;; Fill with spaces using background color or block char
-            (let ((bg (ink-to-charmed-bg ink))
-                  (fill-char #\Space))
-              (when (and (not bg) fg)
-                (setf fill-char #\█))
-              (loop for r from r1 below r2
-                    do (loop for c from c1 below c2
-                             do (if fg
-                                    (charmed:screen-set-cell
-                                     screen c r fill-char
-                                     :style (charmed:make-style :fg fg))
-                                    (charmed:screen-set-cell
-                                     screen c r fill-char)))))
+            ;; Fill rectangle - for terminal, if no explicit color just
+            ;; clear with spaces (terminal default background)
+            (let ((bg (ink-to-charmed-bg ink)))
+              (if (or fg bg)
+                  (let ((style (charmed:make-style :fg fg :bg bg)))
+                    (loop for r from r1 below r2
+                          do (loop for c from c1 below c2
+                                   do (charmed:screen-set-cell
+                                       screen c r #\Space :style style))))
+                  ;; No explicit colors — clear to terminal default
+                  (loop for r from r1 below r2
+                        do (loop for c from c1 below c2
+                                 do (charmed:screen-set-cell
+                                     screen c r #\Space)))))
             ;; Draw border using box characters
             (progn
               ;; Top and bottom edges
@@ -273,11 +291,11 @@
 (defmethod medium-clear-area ((medium charmed-medium) left top right bottom)
   (let ((screen (medium-screen medium)))
     (when screen
-      (let ((c1 (round left))  (r1 (round top))
+      (let ((c1 (max 0 (round left)))  (r1 (max 0 (round top)))
             (c2 (round right)) (r2 (round bottom)))
-        (charmed:screen-fill-rect screen c1 r1
-                                  (- c2 c1) (- r2 r1)
-                                  :char #\Space)))))
+        (when (and (> c2 c1) (> r2 r1))
+          (charmed:screen-fill-rect screen c1 r1
+                                    (- c2 c1) (- r2 r1)))))))
 
 (defmethod medium-beep ((medium charmed-medium))
   (write-char #\Bel *terminal-io*)

@@ -1,4 +1,4 @@
-;;; test-hello.lisp - Simple test of the mcclim-charmed backend
+;;; test-hello.lisp - Test mcclim-charmed with define-application-frame
 ;;;
 ;;; Run with:
 ;;;   sbcl --eval '(ql:quickload :mcclim :silent t)'
@@ -13,32 +13,36 @@
 
 (in-package #:clim-charmed-test)
 
+;;; A McCLIM application frame using the charmed terminal backend
+(define-application-frame hello-charmed ()
+  ()
+  (:panes
+   (display :application
+            :display-function 'display-main
+            :scroll-bars nil))
+  (:layouts
+   (default display))
+  (:top-level (clim-charmed:charmed-frame-top-level)))
+
+(defun display-main (frame pane)
+  (declare (ignore frame))
+  (format pane "~%  Hello from McCLIM on charmed terminal!~%~%")
+  (format pane "  This is a McCLIM application frame~%")
+  (format pane "  running via run-frame-top-level.~%~%")
+  (format pane "  Press Ctrl-Q to exit.~%"))
+
+(define-hello-charmed-command (com-quit :name "Quit"
+                                        :keystroke (#\q :control))
+    ()
+  (frame-exit *application-frame*))
+
 (defun run ()
-  "Minimal test: create port, draw text via medium, present screen, wait for q."
-  (let ((port (make-instance 'clim-charmed::charmed-port
-                             :server-path '(:charmed))))
+  "Run the hello-charmed frame on the charmed terminal backend."
+  (let* ((port (make-instance 'clim-charmed::charmed-port
+                              :server-path '(:charmed)))
+         (fm (first (slot-value port 'climi::frame-managers))))
     (unwind-protect
-         (let ((screen (clim-charmed::charmed-port-screen port))
-               (medium (make-instance 'clim-charmed::charmed-medium)))
-           ;; Manually associate medium with port
-           (setf (slot-value medium 'climi::port) port)
-           ;; Draw text directly via charmed
-           (charmed:screen-write-string screen 2 1
-                                        "Hello from McCLIM on charmed terminal!")
-           (charmed:screen-write-string screen 2 3
-                                        "This is the mcclim-charmed backend.")
-           (charmed:screen-write-string screen 2 4
-                                        "Drawing via charmed-medium to charmed screen.")
-           (charmed:screen-write-string screen 2 6
-                                        "Press 'q' to quit.")
-           ;; Present to terminal
-           (charmed:screen-present screen)
-           ;; Wait for 'q' to quit
-           (loop
-             (let ((key (charmed:read-key-with-timeout 100)))
-               (when key
-                 (let ((ch (charmed:key-event-char key)))
-                   (when (and ch (char= ch #\q))
-                     (return)))))))
-      ;; Cleanup
+         (let ((frame (make-application-frame 'hello-charmed
+                                              :frame-manager fm)))
+           (run-frame-top-level frame))
       (climi::destroy-port port))))
