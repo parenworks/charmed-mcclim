@@ -61,44 +61,60 @@
     (when port
       (charmed-port-screen port))))
 
-;;; Translate McCLIM ink to a charmed color or nil for default
+;;; Translate McCLIM ink to a charmed color or nil for default.
+;;;
+;;; Ink type hierarchy handled:
+;;;   +foreground-ink+, +background-ink+ → terminal default (nil)
+;;;   color (including named colors, contrasting inks) → RGB via color-rgb
+;;;   indirect-ink → unwrap and recurse
+;;;   flipping-ink → nil (can't do XOR in terminal)
+;;;   opacity → nil (terminal doesn't support partial transparency)
+;;;   compose-in/compose-over → extract the color component
+
+(defun resolve-ink (ink)
+  "Resolve an ink to its underlying color, unwrapping indirect-ink and
+   compose-in wrappers.  Returns the resolved ink or NIL."
+  (handler-case
+      (cond
+        ((null ink) nil)
+        ((eq ink +foreground-ink+) nil)
+        ((eq ink +background-ink+) nil)
+        ;; Indirect ink — unwrap
+        ((typep ink 'climi::indirect-ink)
+         (resolve-ink (climi::indirect-ink-ink ink)))
+        ;; Over-compositum — use the foreground design
+        ((typep ink 'climi::over-compositum)
+         (resolve-ink (climi::compositum-foreground ink)))
+        ;; In-compositum / masked-compositum — use the ink design
+        ((typep ink 'climi::masked-compositum)
+         (resolve-ink (climi::compositum-ink ink)))
+        ;; Color — return as-is
+        ((typep ink 'color) ink)
+        ;; Anything else — nil
+        (t nil))
+    (error () nil)))
+
+(defun color-to-charmed (ink)
+  "Convert a CLIM color to a charmed RGB color.
+   Returns NIL for near-white, near-black, or non-color inks (use terminal default)."
+  (when (typep ink 'color)
+    (multiple-value-bind (r g b) (color-rgb ink)
+      ;; Near-white or near-black → use terminal default
+      (if (or (and (> r 0.9) (> g 0.9) (> b 0.9))
+              (and (< r 0.1) (< g 0.1) (< b 0.1)))
+          nil
+          (charmed:make-rgb-color
+           (round (* r 255))
+           (round (* g 255))
+           (round (* b 255)))))))
 
 (defun ink-to-charmed-fg (ink)
   "Convert a CLIM ink to a charmed foreground color."
-  (cond
-    ((eq ink +foreground-ink+) nil)
-    ((eq ink +background-ink+) nil)
-    ((eq ink +white+) nil)
-    ((eq ink +black+) nil)
-    ((typep ink 'color)
-     (multiple-value-bind (r g b) (color-rgb ink)
-       ;; Near-white or near-black → use terminal default
-       (if (or (and (> r 0.9) (> g 0.9) (> b 0.9))
-               (and (< r 0.1) (< g 0.1) (< b 0.1)))
-           nil
-           (charmed:make-rgb-color
-            (round (* r 255))
-            (round (* g 255))
-            (round (* b 255))))))
-    (t nil)))
+  (color-to-charmed (resolve-ink ink)))
 
 (defun ink-to-charmed-bg (ink)
   "Convert a CLIM ink to a charmed background color."
-  (cond
-    ((eq ink +foreground-ink+) nil)
-    ((eq ink +background-ink+) nil)
-    ((eq ink +white+) nil)
-    ((eq ink +black+) nil)
-    ((typep ink 'color)
-     (multiple-value-bind (r g b) (color-rgb ink)
-       (if (or (and (> r 0.9) (> g 0.9) (> b 0.9))
-               (and (< r 0.1) (< g 0.1) (< b 0.1)))
-           nil
-           (charmed:make-rgb-color
-            (round (* r 255))
-            (round (* g 255))
-            (round (* b 255))))))
-    (t nil)))
+  (color-to-charmed (resolve-ink ink)))
 
 ;;; Coordinate transformation - sheet space to screen (mirror) space
 

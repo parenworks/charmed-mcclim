@@ -15,17 +15,13 @@
 - [x] Terminal resize handling
 - [x] Text cursor tracking (hardware cursor at stream-text-cursor position)
 - [x] Text style → terminal attribute mapping (bold, italic, dim, underline)
+- [x] Color mapping (resolve-ink for indirect-ink, over-compositum, masked-compositum; SGR 39/49 reset in charmed)
 
 ## In Progress
 
 (nothing currently in progress)
 
 ## Pending
-
-- [ ] **Color mapping improvements**
-  `medium-ink` → charmed fg/bg color. Basic `ink-to-color` exists but needs
-  richer mapping: named CLIM inks, `+flipping-ink+`, `contrasting-inks`,
-  `indirect-ink`, `make-opacity`, `compose-over`/`compose-in`.
 
 - [ ] **McCLIM event distribution bridge**
   Currently we poll charmed events in the top-level loop and dispatch
