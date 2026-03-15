@@ -456,3 +456,15 @@
 (defmethod (setf medium-clipping-region) :after (region (medium charmed-medium))
   (declare (ignore region))
   nil)
+
+;;; Text cursor drawing — use the terminal's hardware cursor instead of
+;;; McCLIM's graphical cursor rendering (draw-rectangle/draw-line).
+(defmethod draw-design ((sheet clim-stream-pane) (cursor climi::standard-text-cursor)
+                        &rest args)
+  (declare (ignore args))
+  ;; No-op: the charmed backend positions the terminal's hardware cursor
+  ;; in update-terminal-cursor (frame-manager.lisp) instead of drawing
+  ;; a graphical cursor.  Only suppress for charmed port sheets.
+  (if (typep (port sheet) 'charmed-port)
+      nil
+      (call-next-method)))

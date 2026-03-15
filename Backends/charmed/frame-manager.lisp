@@ -212,6 +212,49 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                   10))))
     (error () 10)))
 
+;;; Position the terminal's hardware cursor at the focused pane's text cursor.
+;;; Called after redisplay, before port-force-output.
+(defun update-terminal-cursor (port)
+  "Position the terminal cursor at the focused pane's stream-text-cursor.
+   In a terminal, we always show the hardware cursor on the focused pane
+   at the text cursor position (regardless of McCLIM's cursor-active state,
+   which is only activated for input streams in GUI backends)."
+  (let ((screen (charmed-port-screen port))
+        (focused (port-keyboard-input-focus port)))
+    (when screen
+      (if (and focused (typep focused 'clim-stream-pane))
+          (handler-case
+              (let* ((cursor (stream-text-cursor focused))
+                     (vp (gethash focused (charmed-port-viewport-sizes port))))
+                (if (and cursor vp)
+                    (multiple-value-bind (cx cy) (cursor-position cursor)
+                      ;; vp = (screen-x screen-y width height)
+                      (let* ((vp-sx (first vp))
+                             (vp-sy (second vp))
+                             (vp-w  (third vp))
+                             (vp-h  (fourth vp))
+                             (scroll-y (pane-scroll-offset port focused))
+                             ;; Map sheet cursor position to screen
+                             (col (round (+ vp-sx cx)))
+                             (row (round (- (+ vp-sy cy) scroll-y)))
+                             ;; Viewport bounds on screen
+                             (min-col (round vp-sx))
+                             (min-row (round vp-sy))
+                             (max-col (round (+ vp-sx vp-w)))
+                             (max-row (round (+ vp-sy vp-h))))
+                        (if (and (>= col min-col) (< col max-col)
+                                 (>= row min-row) (< row max-row))
+                            (progn
+                              (charmed:screen-set-cursor screen col row)
+                              (charmed:screen-show-cursor screen t))
+                            ;; Cursor outside viewport — hide it
+                            (charmed:screen-show-cursor screen nil))))
+                    ;; No cursor or no viewport — hide
+                    (charmed:screen-show-cursor screen nil)))
+            (error () (charmed:screen-show-cursor screen nil)))
+          ;; No focused stream pane — hide cursor
+          (charmed:screen-show-cursor screen nil)))))
+
 ;;; Custom frame top-level for charmed.
 ;;; Use as :top-level (charmed-frame-top-level) in define-application-frame.
 ;;; This runs inside run-frame-top-level :around which handles frame-exit.
@@ -236,6 +279,7 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     ;; Initial display
     (redisplay-frame-panes frame :force-p t)
     (draw-pane-borders frame port)
+    (update-terminal-cursor port)
     (port-force-output port)
     ;; Event loop
     (loop
@@ -282,6 +326,7 @@ accumulating sheet-transformation offsets.  Stops at grafts."
       ;; Redisplay any panes that need it
       (redisplay-frame-panes frame)
       (draw-pane-borders frame port)
+      (update-terminal-cursor port)
       (port-force-output port)
       ;; Check for resize
       (let ((resize (charmed:poll-resize)))
@@ -297,6 +342,7 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                 (capture-pane-viewport-sizes frame port)
                 (redisplay-frame-panes frame :force-p t)
                 (draw-pane-borders frame port)
+                (update-terminal-cursor port)
                 (port-force-output port)))))))))
 
 ;;; Suppress space-requirements propagation for the charmed backend.

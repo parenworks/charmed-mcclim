@@ -4,7 +4,7 @@
 **Author:** Glenn Thompson  
 **Project:** `charmed-mcclim`  
 **Language:** Common Lisp  
-**Status:** Phases 1–5a complete; Phase 6 (McCLIM backend) in progress — scrolling, clipping, and focus cycling working  
+**Status:** Phases 1–5a complete; Phase 6 (McCLIM backend) in progress — scrolling, clipping, focus cycling, and text cursor tracking working  
 
 ---
 
@@ -1193,10 +1193,42 @@ The `charmed-frame-top-level` event loop handles:
 - **Up/Down** — scroll focused pane by 1 line
 - **PgUp/PgDn** — scroll focused pane by one viewport height
 
+## Text Cursor Tracking
+
+The charmed backend uses the terminal's hardware cursor instead of McCLIM's
+graphical cursor rendering (which draws rectangles/lines via `draw-design`).
+
+### How it works
+
+After each redisplay cycle, `update-terminal-cursor` reads the focused pane's
+`stream-text-cursor` position and maps it to screen coordinates using the
+frozen viewport geometry and scroll offset:
+
+- **Position** — the cursor's sheet-space `(cx, cy)` is transformed to
+  screen `(col, row)` via `vp-sx + cx` and `vp-sy + cy - scroll-offset`
+- **Visibility** — the cursor is shown only if within the pane's viewport
+  bounds; it hides automatically when scrolled out of view
+- **Focus tracking** — the cursor follows keyboard focus; pressing Tab
+  moves the cursor to the newly focused pane
+
+### Suppressing graphical cursor drawing
+
+McCLIM's `draw-design` method on `standard-text-cursor` draws a colored
+rectangle at the cursor position (blue when focused, grey otherwise). For
+charmed port sheets, this method is overridden to a no-op since the terminal's
+hardware cursor serves the same purpose.
+
+### Notes
+
+- McCLIM's `cursor-active` flag (which gates cursor drawing in GUI backends)
+  is ignored — the terminal cursor is shown on any focused `clim-stream-pane`
+  regardless of active state
+- The viewport lookup uses the focused pane directly (not `medium-sheet`
+  indirection) to avoid identity mismatches with McCLIM's sheet wrapping
+
 ## Known Limitations
 
 - `:scroll-bars t` causes heap exhaustion (viewport/scroller wrappers unsupported)
-- No text cursor tracking for stream output
 - `sheet-native-transformation` is identity — coordinate offsetting handled in medium
 - Header lines scroll with content (no sticky header support yet)
 
