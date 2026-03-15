@@ -9,19 +9,21 @@
 (in-package #:clim-charmed-test-mp)
 
 (defun display-top (frame pane)
-  (declare (ignore frame))
-  (format pane "  TOP PANE: Hello from McCLIM charmed terminal!~%")
-  (format pane "  This pane should appear in the upper half.~%")
-  (format pane "  Press any key to increment counter in bottom pane.~%")
-  (format pane "  Press Ctrl-Q to exit.~%"))
+  (let ((count (slot-value frame 'top-count))
+        (focused (eq pane (port-keyboard-input-focus (port (frame-manager frame))))))
+    (format pane "  TOP PANE~:[~; [FOCUSED]~]~%" focused)
+    (format pane "  Key presses while focused: ~D~%" count)
+    (format pane "  Tab = cycle focus, Ctrl-Q = exit~%")))
 
 (defun display-bottom (frame pane)
-  (let ((count (slot-value frame 'key-count)))
-    (format pane "  BOTTOM PANE: Key presses: ~D~%" count)
-    (format pane "  This pane repaints independently.~%")))
+  (let ((count (slot-value frame 'bottom-count))
+        (focused (eq pane (port-keyboard-input-focus (port (frame-manager frame))))))
+    (format pane "  BOTTOM PANE~:[~; [FOCUSED]~]~%" focused)
+    (format pane "  Key presses while focused: ~D~%" count)))
 
 (define-application-frame multi-pane-test ()
-  ((key-count :initform 0))
+  ((top-count :initform 0)
+   (bottom-count :initform 0))
   (:panes
    (top-pane :application
              :display-function 'display-top
@@ -36,14 +38,20 @@
       (1/4 bottom-pane))))
   (:top-level (clim-charmed:charmed-frame-top-level)))
 
-;;; On any keypress, increment the counter and mark bottom pane for redisplay.
+;;; On any keypress, increment the focused pane's counter and redisplay it.
 (defmethod clim-charmed:charmed-handle-key-event
-    ((frame multi-pane-test) key)
+    ((frame multi-pane-test) key focused-pane)
   (declare (ignore key))
-  (incf (slot-value frame 'key-count))
-  (let ((bp (find-pane-named frame 'bottom-pane)))
-    (when bp
-      (setf (pane-needs-redisplay bp) t))))
+  (when focused-pane
+    (let ((tp (find-pane-named frame 'top-pane))
+          (bp (find-pane-named frame 'bottom-pane)))
+      (cond
+        ((eq focused-pane tp)
+         (incf (slot-value frame 'top-count))
+         (setf (pane-needs-redisplay tp) t))
+        ((eq focused-pane bp)
+         (incf (slot-value frame 'bottom-count))
+         (setf (pane-needs-redisplay bp) t))))))
 
 (defun run ()
   (let* ((port (make-instance 'clim-charmed::charmed-port

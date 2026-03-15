@@ -1093,10 +1093,33 @@ McCLIM stores sheet children in reverse order — border drawing checks
 | `test-hello.lisp` | Single-pane hello world with Ctrl-Q exit |
 | `test-multi-pane.lisp` | Two vertically stacked panes with separator, interactive keypress counter |
 
+## Input Focus
+
+McCLIM tracks keyboard focus via `port-keyboard-input-focus` on the port.
+The charmed backend integrates with this:
+
+- **`collect-frame-panes`** — gathers named `clim-stream-pane` instances,
+  sorted by screen Y position (topmost first)
+- **`cycle-focus`** — Tab advances focus to next pane (wraps around),
+  sets `port-keyboard-input-focus`, marks all panes for redisplay
+- **`child-contains-focused-p`** — walks parent chain to check if a layout
+  child contains the focused sheet
+- **Visual indicator** — separator line above the focused pane is drawn
+  in green (`━` bold horizontal) vs default color for unfocused panes
+- **Key routing** — `charmed-handle-key-event` receives the focused pane
+  as its third argument so frames can handle input per-pane
+
+### McCLIM focus protocol
+
+McCLIM's `(setf port-keyboard-input-focus)` calls `note-input-focus-changed`
+on old and new sheets. `distribute-event` for `keyboard-event` routes to the
+focused sheet. Our backend uses `port-keyboard-input-focus` directly since
+we bypass McCLIM's event distribution (polling charmed events in the top-level
+loop instead).
+
 ## Known Limitations
 
 - `:scroll-bars t` causes heap exhaustion (viewport/scroller wrappers unsupported)
-- No input focus routing to individual panes yet
 - No scrolling / viewport clipping
 - No text cursor tracking for stream output
 - `sheet-native-transformation` is identity — coordinate offsetting handled in medium
