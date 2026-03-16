@@ -14,11 +14,11 @@
 
 (defmethod text-style-ascent (text-style (medium charmed-medium))
   (declare (ignore text-style))
-  1)
+  0)
 
 (defmethod text-style-descent (text-style (medium charmed-medium))
   (declare (ignore text-style))
-  0)
+  1)
 
 (defmethod text-style-height (text-style (medium charmed-medium))
   (+ (text-style-ascent text-style medium)
@@ -287,7 +287,13 @@
               (if style
                   (charmed:screen-write-string screen col row clipped-text
                                                :style style)
-                  (charmed:screen-write-string screen col row clipped-text)))))))))
+                  (charmed:screen-write-string screen col row clipped-text))
+              ;; Track end-of-text for cursor positioning during input editing
+              (let* ((sheet (medium-sheet medium))
+                     (port (port sheet)))
+                (when port
+                  (setf (gethash sheet (charmed-port-last-draw-end port))
+                        (cons (+ col (length clipped-text)) row)))))))))))
 
 (defmethod medium-draw-point* ((medium charmed-medium) x y)
   (let ((screen (medium-screen medium)))

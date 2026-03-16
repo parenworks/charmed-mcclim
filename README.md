@@ -1,81 +1,83 @@
 # charmed-mcclim
 
-A CLIM-inspired terminal application framework for Common Lisp, built on [charmed](https://github.com/parenworks/charmed).
+A terminal-native McCLIM backend for Common Lisp, built on [charmed](https://github.com/parenworks/charmed).
 
 ## What is this?
 
-`charmed-mcclim` brings CLIM's ideas — presentations, command tables, structured panes, and semantic interaction — to the terminal. It is not a McCLIM backend (yet). It is a standalone framework that adopts CLIM's philosophy for terminal-native applications.
+`charmed-mcclim` is a real McCLIM backend that runs McCLIM applications in a terminal. Any McCLIM application using standard panes, commands, presentations, and `accept`/`present` can run in a terminal emulator — no X11 or Wayland required.
 
-Built on `charmed`, a pure-Lisp ANSI terminal library with double-buffered rendering, diff-based screen updates, and a rich widget set.
+Built on `charmed`, a pure-Lisp ANSI terminal library with double-buffered rendering, diff-based screen updates, and mouse support.
 
 ## Features
 
-- **`define-application-frame`** — declarative frame definition with named panes, state, layout, and commands
-- **Multi-pane layout** — application panes, interactor, status bar with automatic resize
-- **Command tables** — define, dispatch, and complete commands (string or symbol names)
-- **Presentations** — semantic objects mapped to screen regions, keyboard traversal, mouse activation
-- **CLIM protocol surface** — `present`/`accept`, presentation types, `accepting-values`
-- **Typed forms** — field type registry with parsing, validation, and medium-rendered editing
-- **Focus management** — Tab between panes, keyboard-first interaction
-- **Event system** — translates charmed terminal events to typed backend events
-- **Clipping medium** — all rendering clipped to pane bounds
-- **Double-buffered** — diff-based rendering via charmed's screen system
-- **Terminal restoration** — always cleans up on exit or crash
-- **136 unit tests** — commands, presentations, focus, forms, frame macro
+### McCLIM Backend (Phase 6)
 
-## Quick Start
+- **Full McCLIM backend** — port, graft, medium, frame-manager classes
+- **McCLIM Listener** — Lisp eval, describe, package commands working
+- **Presentation clicking** — mouse clicks on presented objects invoke translators
+- **Multi-pane layout** — `vertically` composition with automatic resize
+- **Command processing** — `default-frame-top-level`, `accept`/`present`, DREI input editor
+- **Per-pane scrolling** — Up/Down/PgUp/PgDn with scroll clamping
+- **Auto-scroll** — new output automatically scrolls panes to bottom
+- **Focus cycling** — Tab moves between panes with visual indicator
+- **Text styles** — bold, italic, dim, underline mapped to terminal attributes
+- **Color support** — CLIM inks mapped to terminal colors (RGB, named, indirect)
+- **Terminal resize** — automatic relayout on SIGWINCH
+- **Click-to-focus** — mouse click on a pane focuses it
+- **Terminal restoration** — always cleans up on exit or crash
+
+### CLIM-Inspired Framework (Phases 1–5)
+
+The project also includes a standalone CLIM-inspired framework (`src/`) with its own command tables, presentations, typed forms, and examples. This was the foundation before the McCLIM backend was built.
+
+## Quick Start (McCLIM Backend)
 
 ```lisp
-;; Load the system
-(ql:quickload :charmed-mcclim)
+;; Load charmed and the McCLIM backend
+(push #P"/path/to/charmed/" asdf:*central-registry*)
+(push #P"/path/to/charmed-mcclim/Backends/charmed/" asdf:*central-registry*)
+(asdf:load-system :mcclim-charmed)
 
-;; Run the example system browser
-(load "examples/system-browser.lisp")
-(charmed-mcclim/system-browser:run)
+;; Run the presentation test (clickable items)
+(load "Backends/charmed/test-presentations.lisp")
+(charmed-presentation-test:run)
+
+;; Or run the Lisp Listener
+(load "Backends/charmed/test-listener.lisp")
+(clim-charmed-listener:run)
 ```
 
-## Example: System Browser
+## Test Applications
 
-A multi-pane Common Lisp package browser that demonstrates:
-
-- Left pane: scrollable package list with keyboard navigation
-- Right pane: package detail (symbols grouped by type)
-- Bottom: command interactor (type a package name to jump to it)
-- Status bar with context information
-
-```
-┌─ Packages ──────────────┬─ Detail ──────────────────────────┐
-│ > CHARMED               │ Package: CHARMED                  │
-│   CHARMED-MCCLIM        │ Nicknames: (none)                 │
-│   CLABBER               │ Uses: COMMON-LISP                 │
-│   COMMON-LISP           │ External symbols: 312             │
-│   ALEXANDRIA             │                                   │
-│                         │ ── Classes ──                     │
-│                         │   SCREEN-BUFFER                   │
-│                         │   PANEL                           │
-├─ Command ───────────────┴───────────────────────────────────┤
-│ »                                                            │
-└──────────────────────────────────────────────────────────────┘
- Packages: 42  Selected: CHARMED  Tab: switch pane  q: quit
-```
+| File | Description |
+|---|---|
+| `Backends/charmed/test-presentations.lisp` | Clickable fruit list — demonstrates presentation translators |
+| `Backends/charmed/test-listener.lisp` | Terminal Lisp Listener with eval, describe, help |
+| `Backends/charmed/test-real-listener.lisp` | Runs the real McCLIM Listener in terminal |
+| `Backends/charmed/test-interactor.lisp` | McCLIM command input with argument prompting |
+| `Backends/charmed/test-multi-pane.lisp` | Two-pane scrolling and focus demo |
+| `Backends/charmed/test-hello.lisp` | Single-pane hello world |
 
 ## Dependencies
 
-- [charmed](https://github.com/parenworks/charmed) — terminal substrate
+- [charmed](https://github.com/parenworks/charmed) — terminal substrate (pure Lisp, no ncurses)
+- [McCLIM](https://github.com/McCLIM/McCLIM) — Common Lisp Interface Manager
 - [alexandria](https://gitlab.common-lisp.net/alexandria/alexandria) — utilities
 
 ## Documentation
 
-- **[docs/API.md](docs/API.md)** — Complete API reference (frames, panes, commands, presentations, CLIM protocol, forms, focus, medium, events, backend)
-- **[DESIGN.md](DESIGN.md)** — Architecture and design rationale
-- **[examples/README.md](examples/README.md)** — Example walkthroughs
+- **[DESIGN.md](DESIGN.md)** — Architecture, coordinate pipeline, event model, and implementation details
+- **[TODO.md](TODO.md)** — Current status and remaining work
+- **[examples/README.md](examples/README.md)** — CLIM-inspired framework examples (Phases 1–5)
 
 ## Architecture
 
 ```
-charmed (terminal + screen + widgets)
+charmed (terminal I/O + screen buffer + diff rendering)
     ↓
-charmed-mcclim (frames + presentations + commands + panes + CLIM protocol)
+mcclim-charmed (McCLIM backend: port, medium, graft, frame-manager)
+    ↓
+McCLIM (frames, panes, presentations, commands, DREI editor)
     ↓
 your application
 ```

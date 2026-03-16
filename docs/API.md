@@ -1,820 +1,427 @@
-# charmed-mcclim API Reference
+# mcclim-charmed API Reference
 
-Complete API documentation for charmed-mcclim, a CLIM-inspired terminal application framework built on [charmed](https://github.com/parenworks/charmed).
+API documentation for the charmed McCLIM backend — a terminal-native McCLIM port
+built on [charmed](https://github.com/parenworks/charmed).
 
-**Package:** `charmed-mcclim` (nickname: `cmcclim`)
+**Package:** `clim-charmed`
 
 ---
 
 ## Table of Contents
 
-- [Application Frames](#application-frames)
-- [Panes](#panes)
-- [Commands](#commands)
-- [Presentations](#presentations)
-- [CLIM Protocol Surface](#clim-protocol-surface)
-- [Forms and Typed Fields](#forms-and-typed-fields)
+- [Overview](#overview)
+- [Backend Classes](#backend-classes)
+- [Port](#port)
+- [Medium](#medium)
+- [Graft](#graft)
+- [Frame Manager](#frame-manager)
+- [Event Processing](#event-processing)
+- [Scrolling](#scrolling)
 - [Focus Management](#focus-management)
-- [Drawing Medium](#drawing-medium)
-- [Events](#events)
-- [Backend Lifecycle](#backend-lifecycle)
-- [Rendering](#rendering)
+- [Presentation Clicking](#presentation-clicking)
+- [Key Handling](#key-handling)
+- [Writing an Application](#writing-an-application)
 
 ---
 
-## Application Frames
+## Overview
 
-An application frame is the top-level container for a charmed-mcclim application.
-It holds panes, a command table, layout logic, and application state.
+The charmed backend lets any standard McCLIM application run in a terminal emulator.
+Applications use McCLIM's standard APIs — `define-application-frame`, `present`,
+`accept`, `define-command`, presentation types and translators — unchanged.
 
-### define-application-frame (macro)
+The backend provides four classes that implement McCLIM's port/medium/graft/frame-manager
+protocols, translating McCLIM drawing and event operations to charmed terminal I/O.
 
-```lisp
-(define-application-frame name (&rest supers) slots &body options)
-```
+**Exported symbols:**
 
-Declaratively define an application frame class. This is the primary way to structure
-a charmed-mcclim application.
-
-**Arguments:**
-
-- `name` — Symbol naming the frame class.
-- `supers` — Optional superclasses (defaults to `(application-frame)`).
-- `slots` — Standard CLOS slot definitions for the frame class.
-- `options` — Keyword option clauses (see below).
-
-**Option clauses:**
-
-| Clause | Description |
-|--------|-------------|
-| `(:panes (name type &rest initargs) ...)` | Declare named panes. Each pane gets a `frame-<name>` accessor. |
-| `(:layout function-name)` | Layout function `(lambda (backend width height))`. |
-| `(:command-table variable)` | Command table to attach to the frame. |
-| `(:state (plist ...))` | Initial state plist, accessed via `frame-state-value`. |
-| `(:default-initargs key value ...)` | Default initargs for the class (e.g., `:title`). |
-| `(:documentation string)` | Documentation string for the class. |
-
-**What it generates:**
-
-1. A CLOS class inheriting from `application-frame` (plus any supers).
-2. A `make-<name>-panes` function that creates and registers all declared panes.
-3. Accessor functions `frame-<pane-name>` for each named pane.
-4. An `initialize-instance :after` method that wires command table, layout, state, panes, and initializer.
-
-**Interactor auto-wiring:** If a pane is of type `interactor-pane` and no `:command-table` initarg is provided, the frame's command table is automatically passed to it.
-
-**Example:**
-
-```lisp
-(define-application-frame my-browser ()
-  ()
-  (:panes
-    (packages application-pane :title "Packages"
-                                :display-fn #'display-packages)
-    (detail   application-pane :title "Detail"
-                                :display-fn #'display-detail)
-    (command  interactor-pane  :title "Command" :prompt "» ")
-    (status   status-pane))
-  (:layout compute-layout)
-  (:command-table *my-commands*)
-  (:state (:selected 0 :scroll 0 :filter nil))
-  (:default-initargs :title "My Browser"))
-```
-
-### application-frame (class)
-
-```lisp
-(make-instance 'application-frame &key title panes command-table layout state initializer)
-```
-
-**Slots:**
-
-| Slot | Accessor | Description |
-|------|----------|-------------|
-| `title` | `frame-title` | Window/application title string. |
-| `panes` | `frame-panes` | Flat list of pane objects (for backend). |
-| `named-panes` | `frame-named-panes` | Hash table mapping keyword names → pane objects. |
-| `command-table` | `frame-command-table` | The frame's command table (or nil). |
-| `layout` | `frame-layout` | Layout function `(lambda (backend width height))`. |
-| `state` | `frame-state` | Plist of application state. |
-| `initializer` | `frame-initializer` | Function `(lambda (frame))` called once before main loop. |
-
-### frame-pane (function)
-
-```lisp
-(frame-pane frame name)        ; → pane or nil
-(setf (frame-pane frame name) pane)
-```
-
-Look up or register a named pane by keyword. `name` should be a keyword (e.g., `:packages`).
-
-### frame-state-value (function)
-
-```lisp
-(frame-state-value frame key)        ; → value
-(setf (frame-state-value frame key) value)
-```
-
-Get or set a value in the frame's state plist.
-
-### run-frame (function)
-
-```lisp
-(run-frame frame)
-```
-
-Run an application frame. Enters the terminal, starts the backend, runs the main loop,
-and cleans up on exit. If the frame has an initializer, it is called once before the
-main loop begins.
+| Symbol | Type | Description |
+| ------ | ---- | ----------- |
+| `charmed-port` | class | McCLIM port — owns charmed screen, processes terminal input |
+| `charmed-medium` | class | Drawing medium — maps CLIM drawing ops to screen cells |
+| `charmed-frame-manager` | class | Frame lifecycle, layout, top-level event loop |
+| `charmed-frame-top-level` | function | Custom top-level loop for non-interactor apps |
+| `charmed-handle-key-event` | generic | Per-frame key event handler |
 
 ---
 
-## Panes
+## Backend Classes
 
-Panes are rectangular regions of the terminal screen. Three built-in types are provided.
-
-### pane (base class)
-
-**Slots:**
-
-| Slot | Accessor | Description |
-|------|----------|-------------|
-| `x`, `y` | `pane-x`, `pane-y` | Position (1-indexed). |
-| `width`, `height` | `pane-width`, `pane-height` | Dimensions. |
-| `title` | `pane-title` | Optional title string. |
-| `active-p` | `pane-active-p` | Whether the pane accepts events. |
-| `visible-p` | `pane-visible-p` | Whether the pane is rendered. |
-| `border-p` | `pane-border-p` | Whether to draw a border. |
-| `dirty-p` | `pane-dirty-p` | Whether the pane needs redrawing. |
-
-**Content area:** Use `pane-content-x`, `pane-content-y`, `pane-content-width`,
-`pane-content-height` to get the interior rectangle (inside border and title).
-
-**Generic functions:**
-
-- `(pane-render pane medium)` — Render the pane's content.
-- `(pane-handle-event pane event)` — Handle an event dispatched to this pane.
-
-### application-pane
-
-A general-purpose pane with a display function.
+### charmed-port
 
 ```lisp
-(make-instance 'application-pane
-  :title "Title"
-  :display-fn (lambda (pane medium) ...))
+(find-port :server-path '(:charmed))
 ```
+
+The port owns the charmed screen and translates terminal input (keyboard, mouse,
+resize) into McCLIM events. Created automatically when a frame is run with the
+`:charmed` server path.
+
+**Key slots:**
 
 | Slot | Accessor | Description |
-|------|----------|-------------|
-| `display-fn` | `application-pane-display-fn` | `(lambda (pane medium))` called on render. |
-| `scroll-offset` | `application-pane-scroll-offset` | Vertical scroll offset. |
+| ---- | -------- | ----------- |
+| `screen` | `charmed-port-screen` | The `charmed:screen` instance |
+| `scroll-offsets` | `charmed-port-scroll-offsets` | Hash table: pane → integer scroll offset |
+| `viewport-sizes` | `charmed-port-viewport-sizes` | Hash table: pane → (sx sy w h) frozen geometry |
+| `last-draw-end` | `charmed-port-last-draw-end` | Hash table: pane → (col . row) for cursor tracking |
+| `modifier-state` | `charmed-port-modifier-state` | Current modifier key bitmask |
+| `custom-top-level-p` | `charmed-port-custom-top-level-p` | T when `charmed-frame-top-level` is active |
 
-### interactor-pane
+**Port lifecycle:**
 
-A command-line input pane with history and tab completion.
+- `initialize-instance :after` — enters raw mode, alternate screen, enables mouse, creates screen and graft
+- `destroy-port :before` — disables mouse, leaves alternate screen, restores terminal
+- `process-next-event` — polls charmed for input, translates to McCLIM events, calls `distribute-event`
+- `port-force-output` — draws pane borders, positions cursor, calls `charmed:screen-present`
 
-```lisp
-(make-instance 'interactor-pane
-  :title "Command"
-  :prompt "» "
-  :command-table *my-commands*)
-```
-
-| Slot | Accessor | Description |
-|------|----------|-------------|
-| `input` | `interactor-pane-input` | Current input string. |
-| `history` | `interactor-pane-history` | Command history list. |
-| `prompt` | `interactor-pane-prompt` | Prompt string. |
-| `command-table` | `interactor-pane-command-table` | Command table for dispatch/completion. |
-| `message` | `interactor-pane-message` | Feedback message. |
-| `submit-fn` | `interactor-pane-submit-fn` | Custom submit handler. |
-
-### status-pane
-
-A single-line status bar with labeled sections.
+### charmed-medium
 
 ```lisp
-(make-instance 'status-pane)
-(setf (status-pane-sections pane)
-      '(("Mode" . "Browse") ("Items" . "42")))
+(make-medium port sheet)  ; called automatically by McCLIM
 ```
 
-| Slot | Accessor | Description |
-|------|----------|-------------|
-| `sections` | `status-pane-sections` | Alist of `("label" . "value")` pairs. |
+Maps McCLIM drawing operations to charmed screen buffer writes. All coordinates
+are character cells (1 char = 1 unit width, 1 unit height).
 
-### pane-presentations (accessor)
+**Text metrics (monospace terminal):**
+
+| Method | Value |
+| ------ | ----- |
+| `text-style-ascent` | 0 |
+| `text-style-descent` | 1 |
+| `text-style-height` | 1 |
+| `text-style-character-width` | 1 |
+
+**Drawing methods implemented:**
+
+| Method | Terminal representation |
+| ------ | --------------------- |
+| `medium-draw-text*` | `charmed:screen-write-string` with style mapping |
+| `medium-draw-rectangle*` | Filled: space chars; Unfilled: box-drawing chars |
+| `medium-draw-line*` | `─` for horizontal, `│` for vertical |
+| `medium-draw-point*` | `·` character |
+| `medium-clear-area` | `charmed:screen-fill-rect` with spaces |
+| `medium-draw-polygon*` | No-op (not practical in terminal) |
+| `medium-draw-ellipse*` | No-op (not practical in terminal) |
+
+**Coordinate transform:** `sheet-to-screen` maps sheet-local coordinates to
+absolute screen positions using frozen viewport geometry and scroll offsets.
+
+**Clipping:** All drawing is clipped to the pane's frozen viewport bounds via
+`pane-screen-bounds` and `with-clipping`.
+
+**Ink mapping:** `resolve-ink` unwraps `indirect-ink`, `over-compositum`, and
+`masked-compositum` to extract colors. `color-to-charmed` converts CLIM RGB
+colors to charmed terminal colors. Near-white and near-black map to terminal defaults.
+
+**Text style mapping:** `text-style-to-charmed-style` maps McCLIM text styles:
+
+| Face | Terminal attribute |
+| ---- | ----------------- |
+| `:bold` | bold |
+| `:italic` | italic |
+| `:bold-italic` | bold + italic |
+| Size `:tiny`/`:small` | dim |
+| Size `:large`/`:huge` | bold |
+
+### charmed-graft
 
 ```lisp
-(pane-presentations pane)  ; → list of presentation objects
+(make-graft port)  ; called automatically
 ```
 
-Returns the list of presentations registered on a pane.
+Root sheet representing terminal dimensions. `graft-width` and `graft-height`
+return the terminal size in character cells.
+
+### charmed-frame-manager
+
+Inherits from `standard-frame-manager`. Handles:
+
+- **`adopt-frame :before`** — suppresses menu bar and pointer-documentation pane
+- **`adopt-frame :after`** — sizes top-level sheet to terminal, sets `stream-vertical-spacing` to 0, wires event queue ports
+- **`note-frame-enabled`** — enables top-level sheet, triggers initial layout
+- **`redisplay-frame-panes :before`** — captures viewport geometry, pre-clears dirty panes
+- **`redisplay-frame-panes :after`** — auto-scrolls panes to bottom when content exceeds viewport
 
 ---
 
-## Commands
+## Event Processing
 
-### Command Tables
-
-```lisp
-(make-command-table "name" &key parent)
-```
-
-Create a command table. Tables hold named commands and support parent-child inheritance.
-
-| Accessor | Description |
-|----------|-------------|
-| `command-table-name` | Table name string. |
-| `command-table-parent` | Parent table (for inheritance), or nil. |
-
-When looking up commands, the parent chain is searched if the command is not found locally.
-
-### define-command (macro)
+### process-next-event
 
 ```lisp
-(define-command (table-var name &key documentation) (&rest arg-clauses) &body body)
+(process-next-event port &key wait-function timeout)
 ```
 
-Define and register a command in a command table.
+Polls `charmed:read-key-with-timeout` for terminal input. Translates raw charmed
+events into McCLIM events via `translate-charmed-event` and calls `distribute-event`.
 
-**`name` accepts both strings and symbols:**
+- When `timeout` is nil, blocks internally (loops with 50ms polls) until an event arrives
+- When `timeout` is specified, polls once with that timeout
+- Handles terminal resize (SIGWINCH) by relaying layout and redisplay
+- Flushes screen after each event for immediate echo
 
-| Form | Resulting command name |
-|------|----------------------|
-| `"greet"` | `"greet"` (used as-is) |
-| `greet` | `"greet"` (symbol name downcased) |
-| `com-greet` | `"com-greet"` (symbol name downcased) |
-
-This dual acceptance allows both the original charmed-mcclim string convention and CLIM-style symbol naming.
-
-**Argument clauses** can be:
-
-- A plain symbol: `count` — no type checking, no prompt.
-- A full spec: `(name type &key prompt default)` — typed with optional prompt and default.
-
-**Examples:**
+### translate-charmed-event
 
 ```lisp
-;; String name (original style)
-(define-command (*commands* "greet" :documentation "Say hello")
-    ((name string :prompt "Who? "))
-  (format nil "Hello, ~A!" name))
-
-;; Symbol name (CLIM style) — registers as "greet"
-(define-command (*commands* greet :documentation "Say hello")
-    ((name string :prompt "Who? "))
-  (format nil "Hello, ~A!" name))
-
-;; No arguments
-(define-command (*commands* quit) ()
-  (setf (backend-running-p *current-backend*) nil))
+(translate-charmed-event port charmed-key)  ; → McCLIM event or NIL
 ```
 
-### Command Lookup and Execution
+Translates a charmed key-event into a McCLIM standard event:
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `find-command` | `(table name)` | Find a command entry by name (searches parents). |
-| `list-commands` | `(table)` | List all commands (including inherited). |
-| `execute-command` | `(table name &rest args)` | Execute a named command. |
-| `complete-command` | `(table prefix)` | Return matching command names for prefix. |
-| `complete-input` | `(table input)` | Return (completed-text matches unique-p). |
-| `parse-command-input` | `(table input)` | Parse "command arg1 arg2" into (entry args). |
-| `dispatch-command-input` | `(table input)` | Parse and execute command input string. |
+| Charmed event | McCLIM event |
+| ------------- | ------------ |
+| `+key-mouse+` | `pointer-button-press-event` |
+| `+key-mouse-drag+` | `pointer-motion-event` |
+| `+key-mouse-release+` | `pointer-button-release-event` |
+| Keyboard | `key-press-event` |
+| `+key-resize+` | Handled in `process-next-event` |
 
-### register-command (function)
+**Special key characters:** Enter → `#\Return`, Backspace → `#\Backspace`,
+Tab → `#\Tab`, Escape → `#\Escape`. These are required for McCLIM's
+activation gesture and completion gesture checks.
 
-```lisp
-(register-command table name function &optional documentation arg-specs)
-```
+### distribute-event :around
 
-Low-level command registration. Prefer `define-command` for most uses.
+Terminal-specific event routing in `distribute-event :around` on `charmed-port`:
+
+1. **Ctrl-Q** — calls `frame-exit` (quit)
+2. **Key interception** — `charmed-intercept-key-event` handles Tab (focus cycling,
+   only in `charmed-frame-top-level`), Up/Down (scroll ±1), PgUp/PgDn (scroll ±page)
+3. **Pointer events** — routed to the focused pane's event queue (not the clicked
+   pane's), so `stream-read-gesture` can dequeue them. The event's `event-sheet`
+   still points to the clicked pane for hit-detection.
+4. **Other key events** — passed through to McCLIM's standard `distribute-event`
 
 ---
 
-## Presentations
+## Scrolling
 
-Presentations map Lisp objects to screen regions, enabling semantic interaction
-(clicking on a displayed object activates it).
+Per-pane vertical scrolling without McCLIM's `viewport-pane`/`scroller-pane`.
 
-### presentation (class)
-
-```lisp
-(make-presentation object type x y width &key (height 1) pane action)
-```
-
-| Slot | Accessor | Description |
-|------|----------|-------------|
-| `object` | `presentation-object` | The Lisp object being presented. |
-| `type` | `presentation-type` | Presentation type (symbol). |
-| `x`, `y` | `presentation-x`, `presentation-y` | Screen position. |
-| `width`, `height` | `presentation-width`, `presentation-height` | Region size. |
-| `pane` | `presentation-pane` | Owning pane. |
-| `active-p` | `presentation-active-p` | Whether it responds to input. |
-| `focused-p` | `presentation-focused-p` | Whether it has keyboard focus. |
-| `action` | `presentation-action` | `(lambda (presentation))` on activation. |
-
-### Presentation Operations
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `register-presentation` | `(pane presentation)` | Add a presentation to a pane. |
-| `clear-presentations` | `(pane)` | Remove all presentations from a pane. |
-| `hit-test` | `(pane x y)` | Find presentation at screen coordinates. |
-| `active-presentations` | `(pane)` | List active presentations. |
-| `currently-focused-presentation` | `(pane)` | The focused presentation, or nil. |
-| `focus-next-presentation` | `(pane)` | Move focus to next presentation. |
-| `focus-prev-presentation` | `(pane)` | Move focus to previous presentation. |
-| `activate-presentation` | `(presentation)` | Call the presentation's action. |
-| `highlight-presentation` | `(presentation medium &key style)` | Visually highlight. |
-
----
-
-## CLIM Protocol Surface
-
-These APIs mirror the CLIM specification's core abstractions. They are the surface
-that a future McCLIM bridge would map onto.
-
-### Presentation Types
-
-#### define-presentation-type (macro)
+### pane-scroll-offset
 
 ```lisp
-(define-presentation-type name (&rest parameters) &key supertypes description)
+(pane-scroll-offset port pane)           ; → integer (0 = top)
+(setf (pane-scroll-offset port pane) n)
 ```
 
-Define a named presentation type with optional supertype hierarchy.
+### scroll-pane
 
 ```lisp
-(define-presentation-type pathname ()
-  :supertypes (string)
-  :description "A filesystem path")
+(scroll-pane port pane delta)
 ```
 
-**Built-in types:** `t`, `string`, `integer`, `float`, `boolean`, `keyword`,
-`symbol`, `pathname`, `command-name`.
+Adjusts scroll offset by `delta` rows (positive = down). Clamped to
+`[0, content-height - viewport-height]`.
 
-**Type hierarchy:** Types form an inheritance lattice. `presentation-subtypep`
-checks subtype relationships (transitive).
-
-#### Presentation Type Functions
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `find-presentation-type` | `(name)` | Look up a ptype struct by symbol. |
-| `presentation-subtypep` | `(sub super)` | T if sub is a subtype of super (or equal). |
-| `presentation-type-supertypes` | `(name)` | Transitive supertype list. |
-| `presentation-type-to-field-type` | `(type)` | Map ptype symbol → field-type keyword. |
-
-### Presentation Methods
-
-#### define-presentation-method (macro)
+### pane-content-height
 
 ```lisp
-(define-presentation-method qualifier type-name (&rest lambda-list) &body body)
+(pane-content-height pane)  ; → integer
 ```
 
-Define a method on a presentation type. Methods are inherited from supertypes.
+Content height from `stream-output-history` bounding box, or `sheet-region` fallback.
 
-**Qualifiers:**
-
-| Qualifier | Signature | Description |
-|-----------|-----------|-------------|
-| `:present` | `(object medium &key x y width height presentation)` | Render object to medium. |
-| `:accept` | `(input &key default)` | Parse input into typed value. |
-| `:describe` | `(object stream &key)` | Describe object textually. |
-| `:highlight` | `(presentation pane medium &key)` | Custom highlight rendering. |
+### pane-height
 
 ```lisp
-(define-presentation-method :present pathname (object medium &key x y width height presentation)
-  (declare (ignore height presentation))
-  (medium-write-string medium x y
-    (charmed:ellipsize (namestring object) width)
-    :fg (charmed:lookup-color :cyan)))
+(pane-height pane)  ; → integer
 ```
 
-#### find-presentation-method (function)
+Viewport height from frozen geometry, or `sheet-region` fallback.
 
-```lisp
-(find-presentation-method type-name qualifier)  ; → function or nil
-```
+### Auto-scroll
 
-Searches the type and its supertypes for a method with the given qualifier.
-
-### present (function)
-
-```lisp
-(present object type pane medium x y width
-         &key (height 1) action allow-sensitive-inferencing)
-```
-
-The core CLIM output operation. Creates a presentation region in `pane`, registers it,
-and invokes the `:present` method (or a default printer). Returns the created presentation.
-
-**What it does:**
-
-1. Creates a `presentation` object and registers it on the pane.
-2. Calls the `:present` method for the type, if defined.
-3. If no method exists, prints the object with `princ-to-string` (truncated to width).
-
-```lisp
-;; Display a package name as a clickable presentation
-(present "ALEXANDRIA" 'string packages-pane medium
-         5 row 30
-         :action (lambda (p) (inspect-package (presentation-object p))))
-```
-
-### accept (function)
-
-```lisp
-(accept type input &key default prompt)
-```
-
-The core CLIM input operation. Parses `input` (a string) as `type`.
-Returns `(values parsed-value t)` on success or `(values nil error-string)` on failure.
-
-**Resolution order:**
-
-1. If the type has an `:accept` presentation method, call it.
-2. Otherwise, map the presentation type to a field-type keyword and use the field type registry.
-3. Last resort: `read-from-string`.
-
-```lisp
-(accept 'integer "42")         ; → 42, T
-(accept 'string "hello")       ; → "hello", T
-(accept 'integer "abc")        ; → NIL, "Not a valid integer"
-(accept 'integer "abc" :default 0)  ; → 0, T
-```
-
-### accepting-values (macro)
-
-```lisp
-(accepting-values ((&optional stream &key label own-window) &body body)
-```
-
-Collect field definitions from `body` and create a `form-pane-state` for
-multi-field editing. This wraps the fps-\* form API in a CLIM-style interface.
-
-Returns three values:
-
-1. A `form-pane-state` ready for display and event handling.
-2. A thunk `(lambda () committed-p)` to check if the form was committed.
-3. The list of `typed-field` objects (for extracting results).
-
-**Usage pattern:**
-
-```lisp
-(let ((name "World")
-      (port 8080))
-  (multiple-value-bind (form committed-p fields)
-      (accepting-values (nil :label "Settings")
-        (accepting-values-accept 'string :prompt "Name" :default name :name 'name)
-        (accepting-values-accept 'integer :prompt "Port" :default port :name 'port))
-    ;; `form` is a form-pane-state, display with display-form-pane
-    ;; `fields` are typed-field structs, extract results with:
-    (accepting-values-result fields)))
-```
-
-**Note:** `stream` and `own-window` are accepted for CLIM API compatibility but
-are currently unused in the terminal implementation.
-
-#### accepting-values-accept (function)
-
-```lisp
-(accepting-values-accept type &key default prompt name)
-```
-
-Called inside `accepting-values` body to register a field. Returns the default value.
-
-#### accepting-values-result (function)
-
-```lisp
-(accepting-values-result fields)  ; → ((name . value) ...)
-```
-
-Extract an alist of (field-name . committed-value) from a list of typed-fields.
-
----
-
-## Forms and Typed Fields
-
-The forms system provides typed, validated field editing rendered through the medium.
-
-### Field Type Registry
-
-Register custom field types with parsers, serializers, and display functions.
-
-**Built-in field types:** `:string`, `:integer`, `:float`, `:boolean`, `:keyword`, `:symbol`, `:lisp`.
-
-```lisp
-(register-field-type :email
-  :parser (lambda (text)
-            (if (find #\@ text)
-                (values text t)
-                (values nil "Must contain @")))
-  :serializer #'identity
-  :displayer #'identity
-  :indicator "✉")
-```
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `register-field-type` | `(name &key parser serializer displayer indicator)` | Register a field type. |
-| `find-field-type` | `(name)` | Look up a field-type-def by keyword. |
-| `parse-typed-value` | `(text field-type)` | Parse text → (values parsed ok). |
-| `serialize-typed-value` | `(value field-type)` | Value → edit string. |
-| `display-typed-value` | `(value field-type)` | Value → display string. |
-| `validate-typed-field` | `(text type &key choices validator required-p label)` | Full validation. |
-
-### typed-field (struct)
-
-A single field definition for form editing.
-
-```lisp
-(make-typed-field :name 'username
-                  :label "User Name"
-                  :value "alice"
-                  :field-type :string
-                  :required-p t)
-```
-
-| Slot | Description |
-|------|-------------|
-| `name` | Symbol identifier. |
-| `label` | Display label string. |
-| `value` | Current typed value. |
-| `default` | Default for reset. |
-| `field-type` | Registered field type keyword. |
-| `choices` | Constrained value list (cycle with Enter). |
-| `validator` | `(lambda (parsed) → t or error-string)`. |
-| `required-p` | Whether the field must have a value. |
-| `editable-p` | Whether the user can edit it. |
-| `setter` | `(lambda (new-value))` — side effect on commit. |
-| `display-fn` | Custom display override. |
-| `indicator-override` | Custom indicator string. |
-
-### form-pane-state (struct)
-
-Multi-field editing state. Created with `make-typed-form`.
-
-```lisp
-(make-typed-form (list field1 field2 field3)
-  :on-commit (lambda (fps) (save-settings fps))
-  :on-cancel (lambda (fps) (declare (ignore fps)))
-  :on-change (lambda (fps field value) ...))
-```
-
-### Form Navigation (fps-\* API)
-
-| Function | Description |
-|----------|-------------|
-| `fps-selected-field` | Current field. |
-| `fps-move-selection` | Move by delta. |
-| `fps-next-editable` | Jump to next editable field. |
-| `fps-prev-editable` | Jump to previous editable field. |
-| `fps-begin-edit` | Enter single-field edit mode. |
-| `fps-begin-form-mode` | Enter multi-field edit mode. |
-| `fps-commit-edit` | Validate and commit current field. |
-| `fps-commit-all` | Validate and commit all fields. |
-| `fps-cancel-edit` | Cancel editing. |
-| `fps-toggle-boolean` | Toggle boolean field value. |
-| `fps-cycle-choices` | Cycle through choices list. |
-
-### Form Edit Buffer
-
-| Function | Description |
-|----------|-------------|
-| `fps-insert-char` | Insert character at cursor. |
-| `fps-delete-backward` | Delete character before cursor. |
-| `fps-delete-forward` | Delete character at cursor. |
-| `fps-move-cursor` | Move cursor by delta. |
-| `fps-cursor-home` | Move cursor to start. |
-| `fps-cursor-end` | Move cursor to end. |
-
-### Form Display and Events
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `fps-handle-key` | `(fps key-event)` | Handle keyboard input for the form. |
-| `display-form-pane` | `(fps pane medium)` | Render the form in a pane. |
+`redisplay-frame-panes :after` automatically scrolls panes to the bottom when
+content exceeds the viewport. This keeps new output visible without manual scrolling.
 
 ---
 
 ## Focus Management
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `focus-pane` | `(backend pane)` | Give focus to a pane. |
-| `blur-pane` | `(backend pane)` | Remove focus from a pane. |
-| `focus-next-pane` | `(backend)` | Cycle focus to next pane. |
-| `focus-prev-pane` | `(backend)` | Cycle focus to previous pane. |
-| `focused-pane` | `(backend)` | Return the currently focused pane. |
+### cycle-focus
 
-Only panes with `pane-active-p` true are eligible for focus.
+```lisp
+(cycle-focus frame port)
+```
+
+Advances `port-keyboard-input-focus` to the next named `clim-stream-pane`,
+wrapping around. Marks all panes for redisplay so focus indicators update.
+
+### collect-frame-panes
+
+```lisp
+(collect-frame-panes frame)  ; → list of clim-stream-pane
+```
+
+Returns named stream panes sorted by screen Y position (topmost first).
+
+### Visual indicator
+
+Pane separator lines are drawn in green (`━`) above the focused pane,
+default color for unfocused panes.
+
+### Tab behavior
+
+- **`charmed-frame-top-level`** — Tab cycles focus between panes
+- **`default-frame-top-level`** — Tab passes through to DREI as the `:complete`
+  gesture, triggering command/argument completion
 
 ---
 
-## Drawing Medium
+## Presentation Clicking
 
-The medium clips all drawing to pane bounds and maps to charmed's screen.
+Mouse clicks on presentation output records invoke presentation translators.
 
-### charmed-medium (class)
+### Coordinate pipeline
 
-| Slot | Accessor | Description |
-|------|----------|-------------|
-| `screen` | `medium-screen` | The charmed screen instance. |
-| `clip-x`, `clip-y` | `medium-clip-x`, `medium-clip-y` | Clip region origin. |
-| `clip-width`, `clip-height` | `medium-clip-width`, `medium-clip-height` | Clip region size. |
+1. Charmed reports screen `(col, row)` in 0-indexed cells
+2. `find-pane-at-screen-position` finds the target pane using frozen viewport geometry
+3. Pane-local `(x, y)` computed with scroll offset and +0.5 cell-center offset
+4. `make-charmed-pointer-event` creates `pointer-button-press-event` with both
+   native and `pointer-event` sheet-local coordinates set
+5. Event routed to focused pane's queue via `distribute-event :around`
+6. `stream-read-gesture` dequeues → `frame-input-context-button-press-handler` →
+   `find-innermost-applicable-presentation` → translator invocation
 
-### Drawing Functions
-
-```lisp
-(medium-write-string medium x y text &key fg bg style)
-(medium-fill-rect medium x y width height &key char fg bg style)
-(medium-draw-border medium x y width height &key style title)
-```
-
-### with-clipping (macro)
+### find-pane-at-screen-position
 
 ```lisp
-(with-clipping (medium x y width height) &body body)
+(find-pane-at-screen-position port screen-x screen-y)
+; → (values pane local-x local-y) or NIL
 ```
 
-Temporarily restrict the medium's clip region for nested drawing.
+### make-charmed-pointer-event
+
+```lisp
+(make-charmed-pointer-event event-class pane port local-x local-y &key button)
+; → pointer-event instance
+```
+
+Creates a pointer event with both `device-event` and `pointer-event` coordinate
+slots set to pane-local coordinates (the `pointer-event` class shadows
+`device-event`'s `sheet-x`/`sheet-y` slots).
 
 ---
 
-## Events
+## Key Handling
 
-charmed-mcclim translates charmed's raw terminal events into typed event objects.
-
-### Event Classes
-
-| Class | Accessors | Description |
-|-------|-----------|-------------|
-| `backend-event` | `event-timestamp` | Base class. |
-| `keyboard-event` | `keyboard-event-key` | Keyboard input (wraps charmed key-event). |
-| `pointer-event` | `pointer-event-x`, `pointer-event-y` | Base pointer class. |
-| `pointer-button-event` | `pointer-button-event-button`, `pointer-button-event-kind` | Mouse click/release. |
-| `pointer-motion-event` | _(inherits x, y)_ | Mouse movement. |
-| `resize-event` | `resize-event-width`, `resize-event-height` | Terminal resize. |
-
-### translate-event (function)
+### charmed-handle-key-event (generic)
 
 ```lisp
-(translate-event charmed-key)  ; → backend-event or nil
+(defgeneric charmed-handle-key-event (frame event focused-pane))
 ```
 
-### dispatch-event (function)
+Called by `charmed-frame-top-level` for key events that pass through interception.
+Specialize on your frame class to handle application-specific keys:
 
 ```lisp
-(dispatch-event backend event)
+(defmethod clim-charmed:charmed-handle-key-event
+    ((frame my-frame) event focused-pane)
+  (let ((char (keyboard-event-character event)))
+    (case char
+      (#\r (setf (pane-needs-redisplay (find-pane-named frame 'display)) t)))))
 ```
 
-Routes an event to the appropriate pane's `pane-handle-event` method.
+### charmed-intercept-key-event
+
+```lisp
+(charmed-intercept-key-event port event sheet)  ; → T if consumed, NIL if pass-through
+```
+
+Handles terminal-global keys before they reach pane event queues:
+
+| Key | Action | Condition |
+| --- | ------ | --------- |
+| Tab | `cycle-focus` | Only when `custom-top-level-p` is T |
+| Up | Scroll focused pane up 1 line | Always |
+| Down | Scroll focused pane down 1 line | Always |
+| PgUp | Scroll up one page | Always |
+| PgDn | Scroll down one page | Always |
 
 ---
 
-## Backend Lifecycle
+## Writing an Application
 
-### charmed-backend (class)
+### Using default-frame-top-level (recommended)
 
-The backend manages the screen, panes, focus, and main loop.
-
-| Accessor | Description |
-|----------|-------------|
-| `backend-screen` | The charmed screen instance. |
-| `backend-panes` | List of panes. |
-| `backend-focused-pane` | Currently focused pane. |
-| `backend-running-p` | Set to nil to exit the main loop. |
-| `backend-frame` | The application frame. |
-| `*current-backend*` | Dynamic variable bound to the active backend. |
-
-### with-backend (macro)
+For apps with an interactor pane, use McCLIM's standard top-level. This gives you
+command processing, `accept`/`present`, DREI input editing, and Tab completion:
 
 ```lisp
-(with-backend (var &rest initargs) &body body)
-```
-
-Enter alternate screen, initialize the backend, execute body, run the main loop,
-and clean up on exit (including on error).
-
-### Lifecycle Functions
-
-| Function | Description |
-|----------|-------------|
-| `backend-start` | Initialize screen and input handling. |
-| `backend-stop` | Clean up screen and restore terminal. |
-| `backend-main-loop` | Event loop: poll input → translate → dispatch → render. |
-
----
-
-## Rendering
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `render-frame` | `(backend)` | Render all dirty panes. |
-| `render-pane` | `(pane medium)` | Render a single pane. |
-| `invalidate-pane` | `(pane)` | Mark a pane as needing redraw. |
-| `invalidate-all` | `(backend)` | Mark all panes as needing redraw. |
-
-### display-menu-pane (function)
-
-```lisp
-(display-menu-pane menu pane medium
-  &key x y max-width max-height start-item selected-item)
-```
-
-Render a charmed `menu` object inside a pane, with support for selection highlighting,
-separators, shortcuts, and enabled/disabled styling.
-
----
-
-## Complete Example
-
-```lisp
-(defpackage #:my-app
-  (:use #:cl #:charmed #:charmed-mcclim)
-  (:export #:run))
-(in-package #:my-app)
-
-;; Command table
-(defvar *commands* (make-command-table "my-app"))
-
-;; Commands — both naming styles work
-(define-command (*commands* "quit") ()
-  (setf (backend-running-p *current-backend*) nil))
-
-(define-command (*commands* com-greet :documentation "Greet someone")
-    ((name string :prompt "Name: " :default "World"))
-  (format nil "Hello, ~A!" name))
-
-;; Display function
-(defun display-main (pane medium)
-  (let ((frame (backend-frame *current-backend*)))
-    (medium-write-string medium
-      (pane-content-x pane)
-      (pane-content-y pane)
-      (format nil "Greeting: ~A"
-              (or (frame-state-value frame :greeting) "(none)")))))
-
-;; Layout
-(defun my-layout (backend width height)
-  (let* ((frame (backend-frame backend))
-         (main (frame-pane frame :main))
-         (cmd  (frame-pane frame :command))
-         (bar  (frame-pane frame :status))
-         (cmd-h 3))
-    (setf (pane-x main) 1 (pane-y main) 1
-          (pane-width main) width
-          (pane-height main) (- height cmd-h 1)
-          (pane-dirty-p main) t)
-    (setf (pane-x cmd) 1 (pane-y cmd) (- height cmd-h)
-          (pane-width cmd) width
-          (pane-height cmd) cmd-h
-          (pane-dirty-p cmd) t)
-    (setf (pane-x bar) 1 (pane-y bar) height
-          (pane-width bar) width
-          (pane-dirty-p bar) t)
-    (setf (backend-panes backend) (frame-panes frame))))
-
-;; Frame definition
-(define-application-frame my-frame ()
+(define-application-frame my-app ()
   ()
   (:panes
-    (main    application-pane :title "Main" :display-fn #'display-main)
-    (command interactor-pane  :title "Command" :prompt "» ")
-    (status  status-pane))
-  (:layout my-layout)
-  (:command-table *commands*)
-  (:state (:greeting nil))
-  (:default-initargs :title "My App"))
+   (display :application :scroll-bars nil
+            :display-function #'display-items)
+   (interactor :interactor :scroll-bars nil))
+  (:layouts
+   (default (vertically () display interactor))))
 
-;; Entry point
+(define-presentation-type item ())
+
+(define-presentation-method present (object (type item) stream view &key)
+  (declare (ignore view))
+  (format stream "~A" object))
+
+(define-my-app-command (com-inspect :name t) ((obj 'item :gesture :select))
+  (describe obj *standard-output*))
+
+(defun display-items (frame pane)
+  (declare (ignore frame))
+  (dolist (item '("apple" "banana" "cherry"))
+    (present item 'item :stream pane)
+    (terpri pane)))
+
 (defun run ()
-  (run-frame (make-instance 'my-frame)))
+  (run-frame-top-level
+   (make-application-frame 'my-app
+    :server-path '(:charmed))))
 ```
+
+### Using charmed-frame-top-level
+
+For apps without an interactor that handle all input via `charmed-handle-key-event`:
+
+```lisp
+(define-application-frame my-viewer ()
+  ()
+  (:panes
+   (main :application :scroll-bars nil
+         :display-function #'display-content)
+   (detail :application :scroll-bars nil
+           :display-function #'display-detail))
+  (:layouts
+   (default (vertically () main detail)))
+  (:top-level (clim-charmed:charmed-frame-top-level)))
+
+(defmethod clim-charmed:charmed-handle-key-event
+    ((frame my-viewer) event focused-pane)
+  (case (keyboard-event-character event)
+    (#\q (frame-exit frame))
+    (#\r (setf (pane-needs-redisplay (find-pane-named frame 'main)) t))))
+```
+
+### Important constraints
+
+- **`:scroll-bars nil`** — required on all panes. McCLIM's scroll bar wrappers
+  (`viewport-pane`, `scroller-pane`) require mirror geometry support that the
+  charmed backend doesn't provide.
+- **`simple-queue`** — the backend uses `simple-queue` for event queues (not
+  `concurrent-queue`), since there's no separate event thread.
+- **No gadgets** — menu bar, push buttons, and other GUI gadgets are not supported.
+  Use commands and presentations instead.
 
 ---
 
-## CLIM Compatibility Notes
+## Legacy CLIM-Inspired Framework (Phases 1–5)
 
-charmed-mcclim adopts CLIM's vocabulary and concepts but is a terminal-native
-implementation, not a McCLIM backend. Key differences:
+The `src/` directory contains an earlier standalone CLIM-inspired framework with
+its own `define-application-frame` macro, command tables, presentation types,
+typed forms, and `accepting-values`. This was the foundation before the McCLIM
+backend was built.
 
-| CLIM Concept | charmed-mcclim Equivalent |
-|-------------|--------------------------|
-| Streams | `charmed-medium` (coordinate-addressed, not stream-based). |
-| Extended output | `present` creates presentation regions explicitly with x/y/width. |
-| Extended input | `accept` parses strings; no stream-based input protocol yet. |
-| Sheet hierarchy | Flat pane list with keyword naming. |
-| Gadgets | `typed-field` and `form-pane-state` for form editing. |
-| Output recording | Not implemented. |
-| Incremental redisplay | Panes marked dirty and fully redrawn. |
-
-The CLIM protocol surface (`define-presentation-type`, `present`, `accept`,
-`accepting-values`) is designed so that a future McCLIM bridge can map these
-to real CLIM calls, allowing applications written for charmed-mcclim to run
-on McCLIM with minimal changes.
+The legacy framework's API is documented inline in `src/*.lisp`. It uses the
+`charmed-mcclim` package (distinct from the McCLIM backend's `clim-charmed` package).

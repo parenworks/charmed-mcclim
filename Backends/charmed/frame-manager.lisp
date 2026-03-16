@@ -10,23 +10,41 @@
 
 (in-package #:clim-charmed)
 
+
 (defclass charmed-frame-manager (standard-frame-manager)
   ())
+
+;;; Suppress menu bar and pointer-documentation pane for the terminal.
+;;; Menu bar gadgets are not usable without mouse and waste screen rows.
+;;; This runs before the standard adopt-frame creates panes.
+(defmethod adopt-frame :before
+    ((fm charmed-frame-manager) (frame application-frame))
+  (setf (slot-value frame 'climi::menu-bar) nil)
+  (setf (slot-value frame 'climi::pdoc-bar) nil))
 
 ;;; After the standard adopt-frame creates panes, size the top-level
 ;;; sheet to fill the terminal.
 (defmethod adopt-frame :after
     ((fm charmed-frame-manager) (frame application-frame))
   (let ((size (charmed:terminal-size))
+        (port (port fm))
         (tls (frame-top-level-sheet frame)))
     (when tls
       (move-and-resize-sheet tls 0 0 (first size) (second size))
-      ;; Set terminal-appropriate spacing on all stream panes.
-      ;; Default vertical-spacing of 2 causes 3-row line height in a 1-cell terminal.
       (map-over-sheets
        (lambda (sheet)
+         ;; Set terminal-appropriate spacing on all stream panes.
+         ;; Default vertical-spacing of 2 causes 3-row line height in a 1-cell terminal.
          (when (typep sheet 'clim-stream-pane)
-           (setf (stream-vertical-spacing sheet) 0)))
+           (setf (stream-vertical-spacing sheet) 0))
+         ;; Set queue-port on every sheet's event queue so that
+         ;; queue-read/queue-listen-or-wait can call process-next-event.
+         ;; Without this, default-frame-top-level's accept/read-gesture
+         ;; would fail because the sheet queue's port is NIL.
+         (when (typep sheet 'climi::standard-sheet-input-mixin)
+           (let ((q (sheet-event-queue sheet)))
+             (when (and q (typep q 'climi::simple-queue) (null (climi::queue-port q)))
+               (setf (climi::queue-port q) port)))))
        tls))))
 
 ;;; After the frame is enabled and the top-level sheet made visible,
@@ -39,20 +57,26 @@
       (setf (sheet-enabled-p tls) t)
       (layout-frame frame (first size) (second size)))))
 
-;;; Draw horizontal separator lines between sibling panes.
-(defun sheet-screen-y (sheet)
-  "Compute the screen Y coordinate of a sheet by walking up the parent chain,
+;;; Draw separator lines between sibling panes (horizontal and vertical splits).
+(defun sheet-screen-position-xy (sheet)
+  "Compute the screen (X, Y) of SHEET by walking up the parent chain,
 accumulating sheet-transformation offsets.  Stops at grafts."
-  (let ((y 0))
+  (let ((x 0) (y 0))
     (loop for s = sheet then (sheet-parent s)
           while (and s (not (graftp s)))
           do (handler-case
                  (let ((tr (sheet-transformation s)))
                    (when tr
                      (multiple-value-bind (tx ty) (transform-position tr 0 0)
-                       (declare (ignore tx))
+                       (incf x tx)
                        (incf y ty))))
                (error () (return))))
+    (values x y)))
+
+(defun sheet-screen-y (sheet)
+  "Compute the screen Y coordinate of a sheet."
+  (multiple-value-bind (x y) (sheet-screen-position-xy sheet)
+    (declare (ignore x))
     y))
 
 ;;; Capture the layout-allocated viewport geometry of each pane after layout-frame.
@@ -135,37 +159,56 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                thereis (eq s child)))))
 
 (defun draw-pane-borders (frame port)
-  "Draw horizontal separator lines between panes in the frame.
-   The separator above the focused pane is drawn in green."
+  "Draw separator lines between panes in the frame.
+   Horizontal separators (━) between vertically stacked panes,
+   vertical separators (┃) between horizontally split panes.
+   The separator adjacent to the focused pane is drawn in green."
   (let* ((screen (charmed-port-screen port))
          (tls (frame-top-level-sheet frame))
+         (size (charmed:terminal-size))
+         (term-width (first size))
+         (term-height (second size))
          (focus-color (charmed:lookup-color :green)))
     (when (and screen tls)
-      (let ((width (first (charmed:terminal-size))))
-        ;; Find the inner vrack (vertically pane) and draw separators
-        ;; between its direct children.
-        (labels ((find-vrack-children (sheet)
-                   (when (typep sheet 'sheet-parent-mixin)
-                     (let ((children (sheet-children sheet)))
-                       (if (and (>= (length children) 2)
-                                (let ((y0 (sheet-screen-y (first children)))
-                                      (y1 (sheet-screen-y (second children))))
-                                  (> (abs (- y1 y0)) 1)))
-                           children
-                           (loop for child in children
-                                 for result = (find-vrack-children child)
-                                 when result return result))))))
-          (let ((children (find-vrack-children tls)))
-            (when children
-              (dolist (child children)
-                (let ((sy (round (sheet-screen-y child))))
-                  (when (> sy 0)
-                    (let ((fg (if (child-contains-focused-p child port)
-                                  focus-color
-                                  nil)))
-                      (loop for c from 0 below width
-                            do (charmed:screen-set-cell screen c sy #\━
-                                                       :fg fg)))))))))))))
+      (labels ((draw-separators (sheet)
+                 (when (typep sheet 'sheet-parent-mixin)
+                   (let ((children (sheet-children sheet)))
+                     (cond
+                       ;; Vertical stack (vrack-pane) — draw horizontal separators
+                       ((typep sheet 'clim:vrack-pane)
+                        (dolist (child children)
+                          (multiple-value-bind (sx sy)
+                              (sheet-screen-position-xy child)
+                            (declare (ignore sx))
+                            (let ((row (round sy)))
+                              (when (> row 0)
+                                (let ((fg (if (child-contains-focused-p child port)
+                                              focus-color nil)))
+                                  (loop for c from 0 below term-width
+                                        do (charmed:screen-set-cell screen c row #\━
+                                                                    :fg fg))))))
+                          ;; Recurse into children for nested splits
+                          (draw-separators child)))
+                       ;; Horizontal split (hrack-pane) — draw vertical separators
+                       ((typep sheet 'clim:hrack-pane)
+                        (dolist (child children)
+                          (multiple-value-bind (sx sy)
+                              (sheet-screen-position-xy child)
+                            (declare (ignore sy))
+                            (let ((col (round sx)))
+                              (when (> col 0)
+                                (let ((fg (if (child-contains-focused-p child port)
+                                              focus-color nil)))
+                                  (loop for r from 0 below term-height
+                                        do (charmed:screen-set-cell screen col r #\┃
+                                                                    :fg fg))))))
+                          ;; Recurse into children for nested splits
+                          (draw-separators child)))
+                       ;; Other composite — just recurse
+                       (t
+                        (dolist (child children)
+                          (draw-separators child))))))))
+        (draw-separators tls)))))
 
 ;;; Scroll the focused pane by a given delta (positive = scroll down).
 ;;; Clamps the offset to [0, max-scroll] where max-scroll is content-height
@@ -227,28 +270,36 @@ accumulating sheet-transformation offsets.  Stops at grafts."
               (let* ((cursor (stream-text-cursor focused))
                      (vp (gethash focused (charmed-port-viewport-sizes port))))
                 (if (and cursor vp)
-                    (multiple-value-bind (cx cy) (cursor-position cursor)
-                      ;; vp = (screen-x screen-y width height)
-                      (let* ((vp-sx (first vp))
-                             (vp-sy (second vp))
-                             (vp-w  (third vp))
-                             (vp-h  (fourth vp))
-                             (scroll-y (pane-scroll-offset port focused))
-                             ;; Map sheet cursor position to screen
-                             (col (round (+ vp-sx cx)))
-                             (row (round (- (+ vp-sy cy) scroll-y)))
-                             ;; Viewport bounds on screen
-                             (min-col (round vp-sx))
-                             (min-row (round vp-sy))
-                             (max-col (round (+ vp-sx vp-w)))
-                             (max-row (round (+ vp-sy vp-h))))
-                        (if (and (>= col min-col) (< col max-col)
-                                 (>= row min-row) (< row max-row))
-                            (progn
-                              (charmed:screen-set-cursor screen col row)
-                              (charmed:screen-show-cursor screen t))
-                            ;; Cursor outside viewport — hide it
-                            (charmed:screen-show-cursor screen nil))))
+                    (let* ((vp-sx (first vp))
+                           (vp-sy (second vp))
+                           (vp-w  (third vp))
+                           (vp-h  (fourth vp))
+                           ;; Use last-draw-end if available (tracks input
+                           ;; editor echo position); fall back to stream
+                           ;; text cursor.
+                           (draw-end (gethash focused
+                                             (charmed-port-last-draw-end port)))
+                           (col (if draw-end
+                                    (car draw-end)
+                                    (round (+ vp-sx
+                                              (nth-value 0 (cursor-position cursor))))))
+                           (row (if draw-end
+                                    (cdr draw-end)
+                                    (let ((cy (nth-value 1 (cursor-position cursor)))
+                                          (scroll-y (pane-scroll-offset port focused)))
+                                      (round (- (+ vp-sy cy) scroll-y)))))
+                           ;; Viewport bounds on screen
+                           (min-col (round vp-sx))
+                           (min-row (round vp-sy))
+                           (max-col (round (+ vp-sx vp-w)))
+                           (max-row (round (+ vp-sy vp-h))))
+                      (if (and (>= col min-col) (< col max-col)
+                               (>= row min-row) (< row max-row))
+                          (progn
+                            (charmed:screen-set-cursor screen col row)
+                            (charmed:screen-show-cursor screen t))
+                          ;; Cursor outside viewport — hide it
+                          (charmed:screen-show-cursor screen nil)))
                     ;; No cursor or no viewport — hide
                     (charmed:screen-show-cursor screen nil)))
             (error () (charmed:screen-show-cursor screen nil)))
@@ -290,9 +341,17 @@ accumulating sheet-transformation offsets.  Stops at grafts."
 ;;; through to the normal McCLIM dispatch path (queue → read-gesture/accept).
 
 (defun charmed-intercept-key-event (port event)
-  "Handle charmed-specific key events.  Returns T if the event was consumed."
+  "Handle charmed-specific key events.  Returns T if the event was consumed.
+   When the frame is reading a command (inside accept/read-gesture),
+   let Tab and arrow keys pass through to the input editor."
   (let ((key-name (keyboard-event-key-name event))
         (sheet (port-keyboard-input-focus port)))
+    ;; When the frame is reading a command, don't intercept navigation keys —
+    ;; they need to reach the interactor's input buffer.
+    (when sheet
+      (let ((frame (pane-frame sheet)))
+        (when (and frame (climi::frame-reading-command-p frame))
+          (return-from charmed-intercept-key-event nil))))
     (flet ((redisplay-and-present ()
              (when sheet
                (let ((frame (pane-frame sheet)))
@@ -301,8 +360,10 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                    (redisplay-frame-panes frame)
                    (port-force-output port))))))
       (cond
-        ;; Tab cycles focus
-        ((eql key-name :tab)
+        ;; Tab cycles focus (only in charmed-frame-top-level;
+        ;; in default-frame-top-level, Tab passes through to DREI completion)
+        ((and (eql key-name :tab)
+              (charmed-port-custom-top-level-p port))
          (when sheet
            (let ((frame (pane-frame sheet)))
              (when frame
@@ -336,13 +397,14 @@ accumulating sheet-transformation offsets.  Stops at grafts."
    via charmed-handle-key-event."
   (let* ((fm (frame-manager frame))
          (port (port fm)))
+    ;; Signal that the custom top-level is active — Tab cycles focus
+    ;; (in default-frame-top-level, Tab passes through to DREI completion)
+    (setf (charmed-port-custom-top-level-p port) t)
     ;; Set initial focus to the first named pane
     (let ((panes (collect-frame-panes frame)))
       (when panes
         (setf (port-keyboard-input-focus port) (first panes))))
-    ;; Capture allocated viewport sizes before display expands sheet-region
-    (capture-pane-viewport-sizes frame port)
-    ;; Initial display
+    ;; Initial display (pre-clear and viewport capture happen in :before method)
     (redisplay-frame-panes frame :force-p t)
     (port-force-output port)
     ;; Event loop — pump events through McCLIM's standard distribution,
@@ -362,10 +424,59 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                                               (port-keyboard-input-focus port)))
                    (t
                     (handle-event (event-sheet event) event)))))
-      ;; Pre-clear and redisplay any panes that need it
-      (pre-clear-dirty-panes frame port)
+      ;; Redisplay (pre-clear and viewport capture happen in :before method)
       (redisplay-frame-panes frame)
       (port-force-output port))))
+
+;;; Hook into redisplay to capture viewport sizes and pre-clear dirty panes.
+;;; This ensures correct behavior regardless of which top-level loop is used
+;;; (charmed-frame-top-level or default-frame-top-level).
+(defmethod redisplay-frame-panes :before
+    ((frame application-frame) &key force-p)
+  (declare (ignore force-p))
+  (handler-case
+      (let* ((fm (frame-manager frame))
+             (port (when fm (port fm))))
+        (when (and port (typep port 'charmed-port))
+          (capture-pane-viewport-sizes frame port)
+          (pre-clear-dirty-panes frame port)))
+    (error () nil)))
+
+(defmethod redisplay-frame-panes :after
+    ((frame application-frame) &key force-p)
+  (declare (ignore force-p))
+  (let* ((fm (frame-manager frame))
+         (port (when fm (port fm))))
+    (when (and port (typep port 'charmed-port))
+      ;; Auto-scroll: for each pane whose content exceeds the viewport,
+      ;; scroll to show the bottom (latest output).
+      (dolist (pane (collect-frame-panes frame))
+        (handler-case
+            (let ((content-h (pane-content-height pane))
+                  (vh (pane-height pane)))
+              (when (> content-h vh)
+                (let ((max-scroll (- content-h vh))
+                      (current (pane-scroll-offset port pane)))
+                  (when (< current max-scroll)
+                    (setf (pane-scroll-offset port pane) max-scroll)))))
+          (error () nil)))
+      (port-force-output port))))
+
+;;; Prevent noise-strings from entering the DREI buffer on the charmed
+;;; backend.  In GUI backends, noise-strings (e.g. "(package name)")
+;;; display inline as a greyed-out hint.  In the terminal backend they
+;;; corrupt the display because DREI's stroke layout allocates space
+;;; for them but our coordinate mapping doesn't have the output-record
+;;; transformation that GUI backends use to offset the entire DREI area.
+;;; Suppressing them at the source is the cleanest fix — the prompt
+;;; text is already shown by the command loop.
+(defmethod input-editor-format :around ((stream drei-input-editing-mixin)
+                                        format-string &rest format-args)
+  (declare (ignore format-string format-args))
+  (if (typep (port (editor-pane (drei-instance stream)))
+             'charmed-port)
+      nil
+      (call-next-method)))
 
 ;;; Suppress space-requirements propagation for the charmed backend.
 ;;; Content expansion in stream panes must NOT trigger relayout, because:

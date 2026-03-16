@@ -18,7 +18,16 @@
                    :documentation "Per-pane vertical scroll offsets (pane → integer).")
    (viewport-sizes :initform (make-hash-table :test #'eq)
                    :accessor charmed-port-viewport-sizes
-                   :documentation "Per-pane allocated viewport sizes (pane → (width . height))."))
+                   :documentation "Per-pane allocated viewport sizes (pane → (width . height)).")
+   (last-present-time :initform 0
+                      :accessor charmed-port-last-present-time
+                      :documentation "Internal-real-time of last screen-present, for throttling.")
+   (last-draw-end :initform (make-hash-table :test #'eq)
+                  :accessor charmed-port-last-draw-end
+                  :documentation "Per-pane (col . row) of the end of the last drawn text, for cursor tracking during input editing.")
+   (custom-top-level-p :initform nil
+                       :accessor charmed-port-custom-top-level-p
+                       :documentation "T when charmed-frame-top-level is running. Controls whether Tab cycles focus (custom) or passes through to DREI completion (default-frame-top-level)."))
 
   (:default-initargs :pointer (make-instance 'standard-pointer)))
 
@@ -99,24 +108,50 @@
                   (redisplay-frame-panes frame :force-p t)
                   (port-force-output port))))))
         (return-from process-next-event t))))
-  ;; Read terminal input with timeout
-  (let* ((timeout-ms (if timeout
-                         (max 1 (round (* timeout 1000)))
-                         50))
-         (charmed-key (charmed:read-key-with-timeout timeout-ms)))
-    (cond
-      (charmed-key
-       (let ((event (translate-charmed-event port charmed-key)))
-         (when event
-           (distribute-event port event))
-         (if event t (values nil :timeout))))
-      ((maybe-funcall wait-function)
-       (values nil :wait-function))
-      (timeout
-       (values nil :timeout))
-      (t
-       ;; No timeout specified and no event - loop with short sleep
-       (values nil :timeout)))))
+  ;; Read terminal input with timeout.
+  ;; When timeout is nil, block until an event arrives (loop internally).
+  ;; When timeout is specified, poll once with that timeout.
+  (loop
+    (let* ((timeout-ms (if timeout
+                           (max 1 (round (* timeout 1000)))
+                           50))
+           (charmed-key (charmed:read-key-with-timeout timeout-ms)))
+      (cond
+        (charmed-key
+         (let ((event (translate-charmed-event port charmed-key)))
+           (when event
+             (distribute-event port event)
+             ;; Flush screen immediately after each event so that characters
+             ;; echoed by the input editor are visible without waiting for
+             ;; the next event cycle.
+             (port-force-output port))
+           (return (if event t (values nil :timeout)))))
+        ((maybe-funcall wait-function)
+         (return (values nil :wait-function)))
+        (timeout
+         ;; Caller specified a timeout and it expired — return immediately.
+         (return (values nil :timeout)))
+        (t
+         ;; No timeout specified and no event yet — keep polling.
+         ;; Also check for resize while waiting.
+         (let ((resize-key (charmed:poll-resize)))
+           (when resize-key
+             (let* ((size (charmed:terminal-size))
+                    (width (first size))
+                    (height (second size))
+                    (screen (charmed-port-screen port)))
+               (when screen
+                 (charmed:screen-resize screen width height))
+               (let ((fm (first (slot-value port 'climi::frame-managers))))
+                 (when fm
+                   (dolist (frame (frame-manager-frames fm))
+                     (let ((tls (frame-top-level-sheet frame)))
+                       (when tls
+                         (layout-frame frame width height)
+                         (capture-pane-viewport-sizes frame port)
+                         (redisplay-frame-panes frame :force-p t)
+                         (port-force-output port))))))
+               (return t)))))))))  ;; let*/when/let/t-case/cond/let*/loop
 
 ;;; Translate a charmed key-event into a McCLIM event
 
@@ -131,6 +166,59 @@ first frame's top-level-sheet, or the graft."
               (frame-top-level-sheet (first frames))))))
       (first (climi::port-grafts port))))
 
+(defun find-pane-at-screen-position (port screen-x screen-y)
+  "Find the pane under screen coordinates (SCREEN-X, SCREEN-Y).
+   Returns (values pane local-x local-y) or NIL if no pane found.
+   Local coordinates account for the pane's scroll offset so they
+   match output record positions.
+   Uses the frozen viewport geometry from capture-pane-viewport-sizes."
+  (let ((best-pane nil)
+        (best-lx 0)
+        (best-ly 0))
+    (maphash (lambda (pane vp)
+               (let ((sx (first vp))
+                     (sy (second vp))
+                     (w  (third vp))
+                     (h  (fourth vp)))
+                 (when (and (>= screen-x sx) (< screen-x (+ sx w))
+                            (>= screen-y sy) (< screen-y (+ sy h)))
+                   (let ((scroll-y (pane-scroll-offset port pane)))
+                     (setf best-pane pane
+                           ;; Offset by 0.5 to land in the center of the
+                           ;; character cell.  Without this, integer coords
+                           ;; land exactly on the boundary between two
+                           ;; adjacent output records (which use inclusive
+                           ;; bounding rectangles) and the "smallest" one
+                           ;; wins — often the wrong item.
+                           best-lx (+ (- screen-x sx) 0.5)
+                           best-ly (+ (- screen-y sy) scroll-y 0.5))))))
+             (charmed-port-viewport-sizes port))
+    (when best-pane
+      (values best-pane best-lx best-ly))))
+
+(defun make-charmed-pointer-event (event-class pane port local-x local-y
+                                   &key (button nil button-p))
+  "Create a McCLIM pointer event for the charmed backend.
+   Sets the event sheet to PANE and ensures both the native (:x :y) and
+   the pointer-event sheet-local (sheet-x sheet-y) slots contain the
+   pane-local coordinates LOCAL-X, LOCAL-Y.
+   The pointer-event class has its own sheet-x/sheet-y slots that shadow
+   the device-event ones.  We pass local coords as :x/:y so device-event's
+   initialize-instance sets its slots, then we explicitly set the
+   pointer-event slots afterwards."
+  (let ((event (apply #'make-instance event-class
+                      :sheet pane
+                      :pointer (port-pointer port)
+                      :x local-x :y local-y
+                      :modifier-state (charmed-port-modifier-state port)
+                      (when button-p (list :button button)))))
+    ;; Explicitly set the pointer-event's sheet-x/sheet-y slots
+    ;; (these shadow the device-event slots and are what
+    ;;  pointer-event-x / pointer-event-y read).
+    (setf (slot-value event 'climi::sheet-x) local-x
+          (slot-value event 'climi::sheet-y) local-y)
+    event))
+
 (defun translate-charmed-event (port charmed-key)
   "Translate a charmed key-event into a McCLIM standard-event."
   (let ((code (charmed:key-event-code charmed-key))
@@ -138,39 +226,35 @@ first frame's top-level-sheet, or the graft."
     (cond
       ;; Mouse press
       ((eql code charmed:+key-mouse+)
-       (let ((x (charmed:key-event-mouse-x charmed-key))
-             (y (charmed:key-event-mouse-y charmed-key)))
-         (make-instance 'pointer-button-press-event
-                        :sheet sheet
-                        :pointer (port-pointer port)
-                        :button (translate-mouse-button
-                                 (charmed:key-event-mouse-button charmed-key))
-                        :x x :y y
-                        :graft-x x :graft-y y
-                        :modifier-state (charmed-port-modifier-state port))))
+       (let ((sx (charmed:key-event-mouse-x charmed-key))
+             (sy (charmed:key-event-mouse-y charmed-key)))
+         (multiple-value-bind (pane lx ly)
+             (find-pane-at-screen-position port sx sy)
+           (when pane
+             (make-charmed-pointer-event 'pointer-button-press-event
+                                         pane port lx ly
+                                         :button (translate-mouse-button
+                                                  (charmed:key-event-mouse-button charmed-key)))))))
       ;; Mouse drag / motion
       ((eql code charmed:+key-mouse-drag+)
-       (let ((x (charmed:key-event-mouse-x charmed-key))
-             (y (charmed:key-event-mouse-y charmed-key)))
-         (make-instance 'pointer-motion-event
-                        :sheet sheet
-                        :pointer (port-pointer port)
-                        :button 0
-                        :x x :y y
-                        :graft-x x :graft-y y
-                        :modifier-state (charmed-port-modifier-state port))))
+       (let ((sx (charmed:key-event-mouse-x charmed-key))
+             (sy (charmed:key-event-mouse-y charmed-key)))
+         (multiple-value-bind (pane lx ly)
+             (find-pane-at-screen-position port sx sy)
+           (when pane
+             (make-charmed-pointer-event 'pointer-motion-event
+                                         pane port lx ly)))))
       ;; Mouse release
       ((eql code charmed:+key-mouse-release+)
-       (let ((x (charmed:key-event-mouse-x charmed-key))
-             (y (charmed:key-event-mouse-y charmed-key)))
-         (make-instance 'pointer-button-release-event
-                        :sheet sheet
-                        :pointer (port-pointer port)
-                        :button (translate-mouse-button
-                                 (charmed:key-event-mouse-button charmed-key))
-                        :x x :y y
-                        :graft-x x :graft-y y
-                        :modifier-state (charmed-port-modifier-state port))))
+       (let ((sx (charmed:key-event-mouse-x charmed-key))
+             (sy (charmed:key-event-mouse-y charmed-key)))
+         (multiple-value-bind (pane lx ly)
+             (find-pane-at-screen-position port sx sy)
+           (when pane
+             (make-charmed-pointer-event 'pointer-button-release-event
+                                         pane port lx ly
+                                         :button (translate-mouse-button
+                                                  (charmed:key-event-mouse-button charmed-key)))))))
       ;; Resize handled separately in process-next-event
       ((eql code charmed:+key-resize+)
        nil)
@@ -182,11 +266,21 @@ first frame's top-level-sheet, or the graft."
               (modifier-state (logior (if ctrl-p +control-key+ 0)
                                       (if alt-p +meta-key+ 0))))
          (setf (charmed-port-modifier-state port) modifier-state)
-         (make-instance 'key-press-event
-                        :sheet sheet
-                        :key-name (translate-key-name code ch)
-                        :key-character ch
-                        :modifier-state modifier-state))))))
+         (let ((key-name (translate-key-name code ch))
+               ;; Ensure special keys have the right key-character for
+               ;; McCLIM's activation gesture / input editing checks.
+               (key-char (or ch
+                             (case code
+                               (#.charmed:+key-enter+     #\Return)
+                               (#.charmed:+key-backspace+ #\Backspace)
+                               (#.charmed:+key-tab+       #\Tab)
+                               (#.charmed:+key-escape+    #\Escape)
+                               (t nil)))))
+           (make-instance 'key-press-event
+                          :sheet sheet
+                          :key-name key-name
+                          :key-character key-char
+                          :modifier-state modifier-state)))))))
 
 (defun translate-mouse-button (charmed-button)
   "Translate charmed mouse button number to McCLIM pointer button constant."
@@ -279,6 +373,23 @@ first frame's top-level-sheet, or the graft."
     ;; Intercept terminal-specific keys (Ctrl-Tab, PgUp/PgDn)
     (when (charmed-intercept-key-event port event)
       (return-from distribute-event)))
+  ;; For pointer events, bypass the mirror-based sheet traversal.
+  ;; Our mouse events already have the correct target pane and
+  ;; pane-local coordinates set by translate-charmed-event.
+  ;; Route pointer events to the focused pane's event queue so that
+  ;; stream-input-wait (reading from the interactor) can dequeue them.
+  ;; The event's sheet slot still points to the clicked pane, so
+  ;; frame-input-context-button-press-handler will do hit-detection
+  ;; on the correct pane's output history.
+  (when (typep event 'pointer-event)
+    (let ((target (event-sheet event))
+          (focused (port-keyboard-input-focus port)))
+      (when target
+        ;; Dispatch to the focused pane (usually the interactor) so
+        ;; stream-read-gesture can pick it up.  If no focused pane,
+        ;; fall back to the clicked pane.
+        (dispatch-event (or focused target) event)))
+    (return-from distribute-event))
   (call-next-method))
 
 (defmethod set-sheet-pointer-cursor ((port charmed-port) sheet cursor)

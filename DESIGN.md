@@ -4,7 +4,7 @@
 **Author:** Glenn Thompson  
 **Project:** `charmed-mcclim`  
 **Language:** Common Lisp  
-**Status:** Phases 1–5a complete; Phase 6 (McCLIM backend) in progress — scrolling, clipping, focus cycling, text cursor tracking, text styles, color mapping, and event distribution bridge working  
+**Status:** Phases 1–5a complete; Phase 6 (McCLIM backend) substantially complete — McCLIM Listener running, presentation clicking, auto-scroll, multi-pane layout, input editing, color/style mapping, event distribution all working  
 
 ---
 
@@ -1101,6 +1101,7 @@ it to handle application-specific keys:
 |---|---|
 | `test-hello.lisp` | Single-pane hello world with Ctrl-Q exit |
 | `test-multi-pane.lisp` | Two vertically stacked panes with scrolling, focus cycling, and scroll clamping |
+| `test-interactor.lisp` | McCLIM `default-frame-top-level` with interactor pane — command input, argument prompting, text echo |
 
 ## Input Focus
 
@@ -1242,12 +1243,137 @@ hardware cursor serves the same purpose.
 - The viewport lookup uses the focused pane directly (not `medium-sheet`
   indirection) to avoid identity mismatches with McCLIM's sheet wrapping
 
+## Interactor Input Editing
+
+The charmed backend supports McCLIM's `default-frame-top-level` with an
+interactor pane for command input. This uses McCLIM's standard command
+processing path: `read-frame-command` → `accept` → `stream-read-gesture`
+→ input editor (DREI) → `execute-frame-command`.
+
+### Event pump
+
+`process-next-event` blocks internally when `timeout` is nil, polling
+charmed's `read-key-with-timeout` every 50ms. This prevents the command
+loop from spinning (which would print repeated "Command: " prompts).
+When a timeout is specified, a single poll is made with that timeout.
+
+### Key activation
+
+Special keys need explicit `key-character` values for McCLIM's activation
+gesture checks to work:
+
+| Key | `key-character` |
+|---|---|
+| Enter | `#\Return` |
+| Backspace | `#\Backspace` |
+| Tab | `#\Tab` |
+| Escape | `#\Escape` |
+
+Without these, `keyboard-event-character` returns nil and McCLIM's
+`activation-gesture-p` / `delimiter-gesture-p` checks fail silently.
+
+### Text baseline
+
+Terminal cells have no baseline/ascent concept — the entire cell is the
+glyph. The backend sets `text-style-ascent` = 0 and `text-style-descent` = 1
+(height remains 1). This prevents McCLIM from offsetting text by 1 row
+(which it does when ascent = 1 to position text below the baseline).
+
+### Cursor tracking during input editing
+
+McCLIM's DREI input editor manages its own insertion point, separate from
+the stream's `text-cursor`. During input editing, `cursor-position` on the
+stream text cursor returns the position *before* the input started — it
+doesn't advance as characters are typed.
+
+The fix: `medium-draw-text*` records the end position `(col + len, row)` of
+each text draw in a per-pane hash table (`charmed-port-last-draw-end`).
+`update-terminal-cursor` uses this position instead of the stream cursor,
+so the hardware cursor correctly follows the echoed input text.
+
+### Event queue setup
+
+The interactor test uses `simple-queue` (not `concurrent-queue`) for both
+the frame event queue and input buffer. `simple-queue` calls
+`process-next-event` to pump terminal input; `concurrent-queue` blocks on
+a condition variable expecting a separate event thread (which charmed
+doesn't provide).
+
+## McCLIM Listener
+
+The real McCLIM Listener runs on the charmed backend (`test-real-listener.lisp`).
+A custom charmed-native Listener is also provided (`test-listener.lisp`).
+
+### Working features
+
+- Lisp form evaluation with `present`ed results
+- `,Describe` command
+- `,Package` command to switch `*package*`
+- `,Help` and `,Quit` commands
+- Presentation clicking on eval results (clickable output)
+
+### Suppressed features
+
+McCLIM's Listener includes a menu bar and pointer-documentation pane that
+require GUI gadget infrastructure. These are suppressed in `adopt-frame :before`
+by removing the `:menu-bar` and `:pointer-documentation` pane slots before
+the frame is realized.
+
+Noise-string insertion (DREI's inline package hints like "(CL-USER)") is
+suppressed via `input-editor-format :around` to prevent display corruption.
+
+## Presentation Mouse Clicking
+
+Mouse clicks on presentation output records invoke the corresponding
+presentation translators, enabling point-and-click interaction in the terminal.
+
+### Coordinate pipeline
+
+1. **Terminal mouse event** — charmed reports screen `(col, row)` in 0-indexed cells
+2. **`find-pane-at-screen-position`** — uses frozen viewport geometry to find which
+   pane contains the click; computes pane-local `(x, y)` accounting for scroll offset
+3. **Cell-center offset** — adds +0.5 to both x and y so the click lands in the
+   center of the character cell, not on the boundary between adjacent output records
+   (McCLIM's `bounding-rectangle*` returns inclusive min/max, so boundary clicks
+   would match two records and the "smallest" would win — often the wrong one)
+4. **`make-charmed-pointer-event`** — creates a `pointer-button-press-event` with
+   both native `:x`/`:y` and `pointer-event`'s `sheet-x`/`sheet-y` set to the
+   pane-local coordinates (the `pointer-event` class shadows `device-event`'s
+   `sheet-x`/`sheet-y` slots; both must be explicitly set)
+5. **Event routing** — `distribute-event :around` routes pointer events to the
+   **focused pane's event queue** (not the clicked pane's), because
+   `stream-read-gesture` reads from the focused pane (typically the interactor).
+   The event's `event-sheet` still points to the clicked pane for correct
+   hit-detection by `find-innermost-applicable-presentation`.
+6. **`stream-read-gesture`** dequeues the event, recognizes it as a
+   `pointer-button-press-event`, calls `*pointer-button-press-handler*`
+7. **`frame-input-context-button-press-handler`** calls
+   `find-innermost-applicable-presentation` with `pointer-event-x/y` on the
+   event's sheet (the display pane), finds the presentation, and invokes
+   the translator via `throw-highlighted-presentation`
+
+### Click-to-focus
+
+Left-clicking on a `clim-stream-pane` does NOT change keyboard focus.
+Focus remains on the interactor so that the presentation translator result
+can be processed by the active `accept` call.
+
+## Auto-Scroll
+
+`redisplay-frame-panes :after` checks each pane's content height against its
+viewport height. If content exceeds the viewport, the scroll offset is set to
+`content-height - viewport-height` so the latest output is always visible.
+
+This replaces manual PgDn scrolling for following new output.
+
 ## Known Limitations
 
 - `:scroll-bars t` causes heap exhaustion (viewport/scroller wrappers unsupported)
 - `sheet-native-transformation` is identity — coordinate offsetting handled in medium
 - Header lines scroll with content (no sticky header support yet)
+- Tab completion conflicts with Tab focus cycling (not yet resolved)
+- `accepting-values` dialogs not yet supported
 
 ---
 
-*charmed-mcclim — a CLIM-inspired terminal application framework for Common Lisp, built on charmed.*
+*charmed-mcclim — a terminal-native McCLIM backend for Common Lisp, built on charmed.*
