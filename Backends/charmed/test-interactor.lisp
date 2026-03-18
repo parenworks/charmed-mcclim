@@ -68,7 +68,9 @@
     ()
   (frame-exit *application-frame*))
 
-(defun run ()
+(defun run (&key (exit-lisp t))
+  "Run the interactor test application.
+   If EXIT-LISP is true (default), exit SBCL when the frame is closed."
   (setf *message-count* 0)
   (let* ((port (make-instance 'clim-charmed::charmed-port
                               :server-path '(:charmed)))
@@ -84,4 +86,6 @@
                                               :frame-event-queue event-queue
                                               :frame-input-buffer input-buffer)))
            (run-frame-top-level frame))
-      (climi::destroy-port port))))
+      (climi::destroy-port port)
+      (when exit-lisp
+        (uiop:quit 0)))))

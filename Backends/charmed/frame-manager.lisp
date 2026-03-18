@@ -176,34 +176,45 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                      (cond
                        ;; Vertical stack (vrack-pane) — draw horizontal separators
                        ((typep sheet 'clim:vrack-pane)
-                        (dolist (child children)
-                          (multiple-value-bind (sx sy)
-                              (sheet-screen-position-xy child)
-                            (declare (ignore sx))
-                            (let ((row (round sy)))
-                              (when (> row 0)
-                                (let ((fg (if (child-contains-focused-p child port)
-                                              focus-color nil)))
-                                  (loop for c from 0 below term-width
-                                        do (charmed:screen-set-cell screen c row #\━
-                                                                    :fg fg))))))
-                          ;; Recurse into children for nested splits
-                          (draw-separators child)))
+                        (multiple-value-bind (parent-x parent-y)
+                            (sheet-screen-position-xy sheet)
+                          (let* ((parent-col (round parent-x))
+                                 (parent-w (round (bounding-rectangle-width (sheet-region sheet))))
+                                 (col-end (min (+ parent-col parent-w) term-width)))
+                            (dolist (child children)
+                              (multiple-value-bind (sx sy)
+                                  (sheet-screen-position-xy child)
+                                (declare (ignore sx))
+                                (let ((row (round sy)))
+                                  (when (> row (round parent-y))
+                                    (let ((fg (if (child-contains-focused-p child port)
+                                                  focus-color nil)))
+                                      (loop for c from parent-col below col-end
+                                            do (charmed:screen-set-cell screen c row #\━
+                                                                        :fg fg))))))
+                              ;; Recurse into children for nested splits
+                              (draw-separators child)))))
                        ;; Horizontal split (hrack-pane) — draw vertical separators
                        ((typep sheet 'clim:hrack-pane)
-                        (dolist (child children)
-                          (multiple-value-bind (sx sy)
-                              (sheet-screen-position-xy child)
-                            (declare (ignore sy))
-                            (let ((col (round sx)))
-                              (when (> col 0)
-                                (let ((fg (if (child-contains-focused-p child port)
-                                              focus-color nil)))
-                                  (loop for r from 0 below term-height
-                                        do (charmed:screen-set-cell screen col r #\┃
-                                                                    :fg fg))))))
-                          ;; Recurse into children for nested splits
-                          (draw-separators child)))
+                        (multiple-value-bind (parent-x parent-y)
+                            (sheet-screen-position-xy sheet)
+                          (declare (ignore parent-x))
+                          (let* ((parent-row (round parent-y))
+                                 (parent-h (round (bounding-rectangle-height (sheet-region sheet))))
+                                 (row-end (min (+ parent-row parent-h) term-height)))
+                            (dolist (child children)
+                              (multiple-value-bind (sx sy)
+                                  (sheet-screen-position-xy child)
+                                (declare (ignore sy))
+                                (let ((col (round sx)))
+                                  (when (> col 0)
+                                    (let ((fg (if (child-contains-focused-p child port)
+                                                  focus-color nil)))
+                                      (loop for r from parent-row below row-end
+                                            do (charmed:screen-set-cell screen col r #\┃
+                                                                        :fg fg))))))
+                              ;; Recurse into children for nested splits
+                              (draw-separators child)))))
                        ;; Other composite — just recurse
                        (t
                         (dolist (child children)
@@ -322,11 +333,16 @@ accumulating sheet-transformation offsets.  Stops at grafts."
 ;;; Pre-clear screen areas for panes that need redisplay.
 ;;; Must be called BEFORE redisplay-frame-panes so stale content is wiped.
 (defun pre-clear-dirty-panes (frame port)
-  "Clear the screen area of each pane that needs redisplay."
-  (let ((screen (charmed-port-screen port)))
+  "Clear the screen area of each pane that needs redisplay.
+   Skip clearing the focused interactor pane to preserve DREI input text."
+  (let ((screen (charmed-port-screen port))
+        (focused (port-keyboard-input-focus port)))
     (when screen
       (dolist (p (collect-frame-panes frame))
-        (when (pane-needs-redisplay p)
+        (when (and (pane-needs-redisplay p)
+                   ;; Don't clear the focused interactor - it has DREI input text
+                   (not (and (eq p focused)
+                             (typep p 'interactor-pane))))
           (let ((vp (gethash p (charmed-port-viewport-sizes port))))
             (when vp
               (charmed:screen-fill-rect screen
@@ -414,16 +430,18 @@ accumulating sheet-transformation offsets.  Stops at grafts."
       ;; Terminal-specific keys are consumed in distribute-event :around;
       ;; everything else lands in the focused pane's event queue.
       (process-next-event port :timeout 0.05)
-      ;; Drain queued events from all panes
-      (dolist (pane (collect-frame-panes frame))
-        (loop for event = (event-read-no-hang pane)
-              while event
-              do (cond
-                   ((typep event 'key-press-event)
-                    (charmed-handle-key-event frame event
-                                              (port-keyboard-input-focus port)))
-                   (t
-                    (handle-event (event-sheet event) event)))))
+      ;; Drain queued events from all panes, but only when NOT reading a command.
+      ;; During accept/read-gesture, events must stay in the queue for DREI to read.
+      (unless (climi::frame-reading-command-p frame)
+        (dolist (pane (collect-frame-panes frame))
+          (loop for event = (event-read-no-hang pane)
+                while event
+                do (cond
+                     ((typep event 'key-press-event)
+                      (charmed-handle-key-event frame event
+                                                (port-keyboard-input-focus port)))
+                     (t
+                      (handle-event (event-sheet event) event))))))
       ;; Redisplay (pre-clear and viewport capture happen in :before method)
       (redisplay-frame-panes frame)
       (port-force-output port))))
@@ -461,6 +479,55 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                     (setf (pane-scroll-offset port pane) max-scroll)))))
           (error () nil)))
       (port-force-output port))))
+
+
+
+;;; Bind the charmed partial command parser when reading commands on a charmed
+;;; port.  This ensures accelerator-gesture commands that need arguments use
+;;; our terminal-friendly parser instead of the GUI accepting-values dialog.
+(defmethod read-frame-command :around ((frame application-frame) &key stream)
+  (declare (ignore stream))
+  (let* ((fm (frame-manager frame))
+         (port (when fm (port fm))))
+    (if (typep port 'charmed-port)
+        (let ((*partial-command-parser*
+                #'charmed-read-remaining-arguments-for-partial-command))
+          (call-next-method))
+        (call-next-method))))
+
+;;; Charmed-specific partial command parser.
+;;; The standard partial command parser uses `accepting-values' which creates a
+;;; GUI dialog with Exit/Abort buttons.  In the terminal there are no clickable
+;;; buttons so the dialog loops forever.  This replacement prompts for each
+;;; missing argument directly on the interactor pane via `accept'.
+(defun charmed-read-remaining-arguments-for-partial-command
+    (command-table stream partial-command start-position)
+  (declare (ignore command-table start-position))
+  (let* ((command-name (command-name partial-command))
+         (command-args (command-arguments partial-command))
+         (collected nil))
+    (flet ((arg-parser (stream ptype &rest args &key &allow-other-keys)
+             (let* ((arg-p (consp command-args))
+                    (arg (pop command-args))
+                    (missingp (or (null arg-p)
+                                  (climi::unsupplied-argument-p arg))))
+               (if missingp
+                   (let ((value (apply #'accept ptype :stream stream args)))
+                     (push value collected)
+                     value)
+                   (progn
+                     (push arg collected)
+                     arg))))
+           (del-parser (stream type)
+             (declare (ignore stream type))
+             nil))
+      (let ((target (if (encapsulating-stream-p stream)
+                        (encapsulating-stream-stream stream)
+                        stream)))
+        (fresh-line target)
+        (climi::parse-command command-name #'arg-parser #'del-parser target)))
+    `(,command-name ,@(nreverse collected))))
+
 
 ;;; Prevent noise-strings from entering the DREI buffer on the charmed
 ;;; backend.  In GUI backends, noise-strings (e.g. "(package name)")

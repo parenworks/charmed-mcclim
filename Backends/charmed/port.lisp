@@ -271,11 +271,16 @@ first frame's top-level-sheet, or the graft."
                ;; McCLIM's activation gesture / input editing checks.
                (key-char (or ch
                              (case code
-                               (#.charmed:+key-enter+     #\Return)
+                               (#.charmed:+key-enter+     #\Newline)
                                (#.charmed:+key-backspace+ #\Backspace)
                                (#.charmed:+key-tab+       #\Tab)
                                (#.charmed:+key-escape+    #\Escape)
                                (t nil)))))
+           ;; DEBUG: log key events
+           (with-open-file (log "/tmp/charmed-keys.log" :direction :output
+                                :if-exists :append :if-does-not-exist :create)
+             (format log "KEY: code=~A ch=~S key-name=~A key-char=~S~%"
+                     code ch key-name key-char))
            (make-instance 'key-press-event
                           :sheet sheet
                           :key-name key-name
@@ -293,7 +298,7 @@ first frame's top-level-sheet, or the graft."
 (defun translate-key-name (code ch)
   "Translate charmed key code to a McCLIM key name keyword."
   (cond
-    ((eql code charmed:+key-enter+)     :return)
+    ((eql code charmed:+key-enter+)     :newline)
     ((eql code charmed:+key-tab+)       :tab)
     ((eql code charmed:+key-backspace+) :backspace)
     ((eql code charmed:+key-delete+)    :delete)
@@ -372,7 +377,20 @@ first frame's top-level-sheet, or the graft."
       (return-from distribute-event))
     ;; Intercept terminal-specific keys (Ctrl-Tab, PgUp/PgDn)
     (when (charmed-intercept-key-event port event)
-      (return-from distribute-event)))
+      (return-from distribute-event))
+    ;; Route key events to the focused pane's event queue so that
+    ;; stream-read-gesture (DREI input editing) can dequeue them.
+    ;; The default distribute-event uses mirror-based sheet traversal
+    ;; which doesn't work for the charmed backend.
+    (let ((focused (port-keyboard-input-focus port)))
+      (when focused
+        ;; DEBUG: log dispatch
+        (with-open-file (log "/tmp/charmed-dispatch.log" :direction :output
+                             :if-exists :append :if-does-not-exist :create)
+          (format log "DISPATCH: key=~A to ~A~%" 
+                  (keyboard-event-key-name event) (type-of focused)))
+        (dispatch-event focused event)))
+    (return-from distribute-event))
   ;; For pointer events, bypass the mirror-based sheet traversal.
   ;; Our mouse events already have the correct target pane and
   ;; pane-local coordinates set by translate-charmed-event.

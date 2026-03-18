@@ -130,7 +130,13 @@
   "Transform sheet-space coordinates to screen coordinates using the frozen
    viewport geometry captured before display (to avoid relayout drift).
    Falls back to a parent-chain walk if no frozen geometry is available.
-   Applies the pane's scroll offset to the Y coordinate."
+   Applies the pane's scroll offset to the Y coordinate.
+   Also applies the medium-transformation to account for output-record offsets
+   used by DREI during accept prompts."
+  ;; Apply medium transformation to get coordinates in sheet space
+  (let ((tr (medium-transformation medium)))
+    (when tr
+      (multiple-value-setq (x y) (transform-position tr x y))))
   (let* ((sheet (medium-sheet medium))
          (port (port medium))
          (scroll-y (if (and port sheet)
@@ -278,6 +284,8 @@
                       (:right (- col (length text)))
                       (:center (- col (floor (length text) 2)))
                       (otherwise col)))
+               (sheet (medium-sheet medium))
+               (port (port sheet))
                (len (length text))
                (style (text-style-to-charmed-style medium)))
           (with-clipping (medium col row :width len)
@@ -288,12 +296,10 @@
                   (charmed:screen-write-string screen col row clipped-text
                                                :style style)
                   (charmed:screen-write-string screen col row clipped-text))
-              ;; Track end-of-text for cursor positioning during input editing
-              (let* ((sheet (medium-sheet medium))
-                     (port (port sheet)))
-                (when port
-                  (setf (gethash sheet (charmed-port-last-draw-end port))
-                        (cons (+ col (length clipped-text)) row)))))))))))
+              ;; Track end-of-text for cursor positioning during input editing.
+              (when (and port (plusp (length clipped-text)))
+                (setf (gethash sheet (charmed-port-last-draw-end port))
+                      (cons (+ col (length clipped-text)) row))))))))))
 
 (defmethod medium-draw-point* ((medium charmed-medium) x y)
   (let ((screen (medium-screen medium)))
@@ -378,6 +384,17 @@
       ;; These are full-screen background clears that would wipe child pane content.
       (when (and filled (not (typep sheet 'clim-stream-pane)))
         (return-from medium-draw-rectangle*))
+      ;; For focused interactor, skip large filled rects (pane clears) but allow
+      ;; small rects for character-level clearing during editing
+      (let ((port (port sheet)))
+        (when (and filled
+                   port
+                   (typep port 'charmed-port)
+                   (typep sheet 'interactor-pane)
+                   (eq sheet (port-keyboard-input-focus port))
+                   ;; Skip if height > 2 lines (likely full pane clear, not char clear)
+                   (> (- bottom top) 2))
+          (return-from medium-draw-rectangle*)))
       (multiple-value-bind (sl st) (sheet-to-screen medium left top)
         (multiple-value-bind (sr sb) (sheet-to-screen medium right bottom)
           (let* ((c1 (round sl))  (r1 (round st))
