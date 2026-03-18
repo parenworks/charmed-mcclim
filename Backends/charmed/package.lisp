@@ -6,4 +6,5 @@
            #:charmed-handle-key-event
            #:charmed-port
            #:charmed-medium
-           #:charmed-frame-manager))
+           #:charmed-frame-manager
+           #:charmed-frame-wants-raw-keys-p))

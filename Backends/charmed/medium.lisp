@@ -544,3 +544,13 @@
   (if (typep (port sheet) 'charmed-port)
       nil
       (call-next-method)))
+
+;;; Suppress DREI's graphical cursor (the blue/flipping-ink rectangle)
+;;; on charmed ports.  The terminal hardware cursor is positioned by
+;;; update-terminal-cursor instead.
+(defmethod drei:display-drei-view-cursor ((stream clim-stream-pane)
+                                          (view drei:drei-buffer-view)
+                                          (cursor drei:drei-cursor))
+  (when (typep (port stream) 'charmed-port)
+    (return-from drei:display-drei-view-cursor nil))
+  (call-next-method))

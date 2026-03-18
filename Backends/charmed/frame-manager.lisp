@@ -356,6 +356,12 @@ accumulating sheet-transformation offsets.  Stops at grafts."
 ;;; and never reach the sheet's event queue.  All other key events pass
 ;;; through to the normal McCLIM dispatch path (queue → read-gesture/accept).
 
+(defgeneric charmed-frame-wants-raw-keys-p (frame)
+  (:documentation "Return T if the frame wants raw key events (arrow keys, etc.)
+   delivered to its event queue instead of being intercepted for scrolling.
+   Applications can specialize this to enable custom key handling modes.")
+  (:method ((frame t)) nil))
+
 (defun charmed-intercept-key-event (port event)
   "Handle charmed-specific key events.  Returns T if the event was consumed.
    When the frame is reading a command (inside accept/read-gesture),
@@ -367,6 +373,9 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     (when sheet
       (let ((frame (pane-frame sheet)))
         (when (and frame (climi::frame-reading-command-p frame))
+          (return-from charmed-intercept-key-event nil))
+        ;; When the frame wants raw keys (e.g. browse mode), pass through
+        (when (and frame (charmed-frame-wants-raw-keys-p frame))
           (return-from charmed-intercept-key-event nil))))
     (flet ((redisplay-and-present ()
              (when sheet
