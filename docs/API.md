@@ -214,12 +214,13 @@ hooks for display, layout, and event processing.
 **Methods:**
 
 - **`adopt-frame :before`** — suppresses menu bar and pointer-documentation pane by nil-ing the frame's `:menu-bar` and `:pdoc-bar` slots
-- **`adopt-frame :after`** — sizes top-level sheet to terminal dimensions, sets `stream-vertical-spacing` to 0 on all `clim-stream-pane` instances, wires `queue-port` on every sheet's event queue so `process-next-event` can pump input
-- **`note-frame-enabled`** — enables top-level sheet, triggers initial `layout-frame` at terminal size
+- **`adopt-frame :after`** — sizes top-level sheet to terminal dimensions, sets `stream-vertical-spacing` to 0 on all `clim-stream-pane` instances, caps `border-width` to 1 on `spacing-pane` subclasses (borders consume full character rows in terminal), wires `queue-port` on every sheet's event queue so `process-next-event` can pump input
+- **`note-frame-enabled`** — enables top-level sheet, triggers initial `layout-frame` at terminal size, post-layout transformation clamping (moves off-screen panes into terminal bounds), screen buffer resize, and medium type fixup
 - **`redisplay-frame-panes :before`** — calls `capture-pane-viewport-sizes` then `pre-clear-dirty-panes` (charmed port only)
 - **`redisplay-frame-panes :after`** — auto-scrolls panes to bottom when content exceeds viewport, then calls `port-force-output` (charmed port only)
 - **`read-frame-command :around`** — binds `*partial-command-parser*` to `charmed-read-remaining-arguments-for-partial-command` when on a charmed port
 - **`input-editor-format :around`** — suppresses DREI noise-string insertion (package hints like "(CL-USER)") on charmed port to prevent display corruption
+- **`compose-space :around`** on `clim-stream-pane` — scales pixel-sized space requirements to terminal-appropriate sizes; interactor panes get a reserved portion (1/6 of terminal height), non-interactor panes get the remainder
 - **`note-space-requirements-changed`** — suppresses relayout propagation on charmed port; content expansion must not trigger parent composite relayout which would replay stale output records
 
 ---
@@ -425,6 +426,12 @@ nested layout composites, supporting mixed vertical/horizontal splits.
 Snapshots each named `clim-stream-pane`'s screen position and layout-allocated
 size into the port's `viewport-sizes` hash table. Stores
 `(screen-x screen-y width height)` as a list.
+
+Starts the parent-chain walk from `sheet-parent` (excluding the sheet's own
+content transformation) and skips `viewport-pane` transformations (which
+represent content scrolling, not screen position). Clamps the resulting
+screen-y to terminal bounds so panes placed off-screen by the layout engine
+are still addressable.
 
 Must be called **before** redisplay, because display functions expand the
 `clim-stream-pane`'s `sheet-region` and may cause parent relayout that changes
@@ -748,18 +755,21 @@ Vertical separator lines (`┃`) are drawn between horizontally split panes.
 | `test-presentations.lisp` | `default-frame-top-level` | Clickable fruit list — presentation translators, mouse click → command |
 | `test-listener.lisp` | `default-frame-top-level` | Terminal-native Lisp Listener with eval, describe, package, help commands |
 | `test-real-listener.lisp` | `default-frame-top-level` | Runs the real McCLIM `clim-listener::listener` frame in terminal |
+| `test-mcclim-examples.lisp` | both | Runs standard McCLIM examples (summation, views, address-book, indentation, stream-test, town-example) on the charmed backend |
 
 ---
 
 ## Known Limitations
 
-- **`:scroll-bars t`** causes heap exhaustion (viewport/scroller wrappers unsupported)
+- **`:scroll-bars t`** on custom charmed apps causes heap exhaustion (viewport/scroller wrappers unsupported). Standard McCLIM examples that specify `:scroll-bars` work because the post-layout transformation clamping handles the overflow
 - **`sheet-native-transformation`** is identity for all sheets — coordinate offsetting handled in medium via frozen viewport geometry
 - **Header lines** scroll with content (no sticky header support)
 - **Tab completion** conflicts with Tab focus cycling in `charmed-frame-top-level` (in `default-frame-top-level`, Tab passes through to DREI correctly)
 - **`accepting-values` dialogs** not yet supported (partial command parser works around the immediate need)
 - **No drawing graphics** — polygons and ellipses are no-ops; lines limited to horizontal/vertical
 - **Single-size monospace** — font family and size are ignored (terminal constraint)
+- **Layout overflow** — McCLIM's GUI-oriented layout engine may allocate more rows than the terminal has (e.g., `:height 500` treated as 500 character rows). The backend clamps pane transformations post-layout, but panes may get less space than requested
+- **Non-interactor examples** — standard McCLIM examples without an interactor pane cannot be exited with Ctrl-Q (they use `default-frame-top-level` which blocks in `accept`). Use the process kill to exit
 
 ---
 

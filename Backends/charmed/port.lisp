@@ -276,11 +276,6 @@ first frame's top-level-sheet, or the graft."
                                (#.charmed:+key-tab+       #\Tab)
                                (#.charmed:+key-escape+    #\Escape)
                                (t nil)))))
-           ;; DEBUG: log key events
-           (with-open-file (log "/tmp/charmed-keys.log" :direction :output
-                                :if-exists :append :if-does-not-exist :create)
-             (format log "KEY: code=~A ch=~S key-name=~A key-char=~S~%"
-                     code ch key-name key-char))
            (make-instance 'key-press-event
                           :sheet sheet
                           :key-name key-name
@@ -347,6 +342,56 @@ first frame's top-level-sheet, or the graft."
 (defmethod port-modifier-state ((port charmed-port))
   (charmed-port-modifier-state port))
 
+;;; Flush the terminal screen after DREI redraws.  After each keystroke in
+;;; the input editor, DREI calls display-drei which draws the updated buffer
+;;; contents.  In GUI backends, dispatch-repaint (called in display-drei :after)
+;;; triggers the window server to composite the result.  In the terminal,
+;;; dispatch-repaint is a no-op for mute-repainting sheets, and the
+;;; finish-output → medium-finish-output chain gets swallowed by
+;;; output-recording-stream wrapping.  This :after method is the reliable
+;;; hook point — it fires after DREI has drawn, so we just present the screen.
+(defmethod drei:display-drei :after ((drei drei:drei-area) &key redisplay-minibuffer)
+  (declare (ignore redisplay-minibuffer))
+  (let* ((pane (drei:editor-pane drei))
+         (port (when pane (port pane))))
+    (when (typep port 'charmed-port)
+      (let ((screen (charmed-port-screen port)))
+        (when screen
+          (update-terminal-cursor port)
+          (charmed:screen-present screen))))))
+
+;;; Override dispatch-repaint for charmed-port sheets.
+;;; McCLIM's dispatch-repaint on immediate-repainting-mixin checks
+;;; sheet-mirrored-ancestor (NIL for terminal panes), and repaint-sheet
+;;; checks sheet-mirror (also NIL).  Both bail out, meaning output records
+;;; are never replayed to the medium.  This override bypasses both checks
+;;; and directly replays output records for output-recording streams,
+;;; or calls handle-repaint for other sheets.
+(defmethod dispatch-repaint :around ((sheet basic-sheet) region)
+  (let ((port (port sheet)))
+    (if (typep port 'charmed-port)
+        (when (sheet-viewable-p sheet)
+          (if (typep sheet 'standard-output-recording-stream)
+              ;; For output-recording streams, replay records directly
+              ;; with :draw t so text reaches the medium.
+              (with-output-recording-options (sheet :record nil :draw t)
+                (let ((region-1 (region-intersection region (sheet-region sheet))))
+                  (unless (region-equal region-1 +nowhere+)
+                    (stream-replay sheet region-1))))
+              ;; For non-recording sheets, just call handle-repaint
+              (handle-repaint sheet region)))
+        (call-next-method))))
+
+;;; Flush the terminal screen after any handle-repaint on a charmed-port sheet.
+(defmethod handle-repaint :after ((sheet basic-sheet) region)
+  (declare (ignore region))
+  (let ((port (port sheet)))
+    (when (typep port 'charmed-port)
+      (let ((screen (charmed-port-screen port)))
+        (when screen
+          (update-terminal-cursor port)
+          (charmed:screen-present screen))))))
+
 (defmethod (setf port-keyboard-input-focus) (focus (port charmed-port))
   (setf (slot-value port 'climi::focused-sheet) focus))
 
@@ -376,8 +421,9 @@ first frame's top-level-sheet, or the graft."
               (return-from distribute-event)))))
       (return-from distribute-event))
     ;; Intercept terminal-specific keys (Ctrl-Tab, PgUp/PgDn)
-    (when (charmed-intercept-key-event port event)
-      (return-from distribute-event))
+    (let ((intercepted (charmed-intercept-key-event port event)))
+      (when intercepted
+        (return-from distribute-event)))
     ;; Route key events appropriately.
     ;; When the frame wants raw keys (e.g. browse mode), queue to the
     ;; frame's event queue so read-frame-command can dequeue them directly.
@@ -388,10 +434,6 @@ first frame's top-level-sheet, or the graft."
           (if (and frame (charmed-frame-wants-raw-keys-p frame))
               ;; Raw mode: queue directly to frame's event queue
               (let ((queue (climi::frame-event-queue frame)))
-                (with-open-file (log "/tmp/charmed-browse.log" :direction :output
-                                     :if-exists :append :if-does-not-exist :create)
-                  (format log "RAW-KEY: ~A queue=~A~%" 
-                          (keyboard-event-key-name event) (type-of queue)))
                 (when queue
                   (climi::queue-append queue event)))
               ;; Normal mode: dispatch to focused pane for DREI

@@ -209,13 +209,19 @@
   "Walk up the PARENT chain to compute the absolute screen position (x, y)
    of SHEET by accumulating sheet-transformation offsets.  Starts from the
    sheet's parent — the sheet's own transformation is excluded because it
-   may include content offsets from output recording.  Stops at grafts."
+   may include content offsets from output recording.  Stops at grafts.
+   When a viewport-pane is encountered, skip its transformation (which
+   represents content scrolling, not screen position) — we use the
+   viewport's own screen position instead."
   (let ((sx 0) (sy 0))
     (loop for s = (sheet-parent sheet) then (sheet-parent s)
           while (and s (not (graftp s)))
           do (handler-case
                  (let ((tr (sheet-transformation s)))
-                   (when tr
+                   (when (and tr
+                              ;; Skip viewport transformations — they represent
+                              ;; content scrolling offset, not screen position.
+                              (not (typep s 'climi::viewport-pane)))
                      (multiple-value-bind (tx ty) (transform-position tr 0 0)
                        (incf sx tx)
                        (incf sy ty))))
@@ -601,6 +607,53 @@
 (defmethod (setf medium-clipping-region) :after (region (medium charmed-medium))
   (declare (ignore region))
   nil)
+
+;;; Flush the terminal screen when McCLIM calls finish-output or force-output
+;;; on a stream backed by a charmed-medium.  DREI's display-drei-area calls
+;;; (finish-output stream) after drawing input echo, which chains through
+;;; stream-finish-output → medium-finish-output.  Without these overrides
+;;; the default is a no-op and typed characters never appear on screen.
+(defmethod medium-finish-output ((medium charmed-medium))
+  (let* ((sheet (medium-sheet medium))
+         (port (port sheet))
+         (screen (when (typep port 'charmed-port)
+                   (charmed-port-screen port))))
+    (when screen
+      (update-terminal-cursor port)
+      (charmed:screen-present screen))))
+
+(defmethod medium-force-output ((medium charmed-medium))
+  (let* ((port (port (medium-sheet medium)))
+         (screen (when (typep port 'charmed-port)
+                   (charmed-port-screen port))))
+    (when screen
+      (update-terminal-cursor port)
+      (charmed:screen-present screen))))
+
+;;; Catch-all: any basic-medium on a charmed-port sheet should also flush.
+;;; This handles panes that get a basic-medium instead of charmed-medium
+;;; (e.g. interactor panes inside scroller/viewport composites).
+(defmethod medium-finish-output :around ((medium basic-medium))
+  (let* ((sheet (medium-sheet medium))
+         (port (when sheet (port sheet))))
+    (if (and port (typep port 'charmed-port)
+             (not (typep medium 'charmed-medium)))
+        (let ((screen (charmed-port-screen port)))
+          (when screen
+            (update-terminal-cursor port)
+            (charmed:screen-present screen)))
+        (call-next-method))))
+
+(defmethod medium-force-output :around ((medium basic-medium))
+  (let* ((sheet (medium-sheet medium))
+         (port (when sheet (port sheet))))
+    (if (and port (typep port 'charmed-port)
+             (not (typep medium 'charmed-medium)))
+        (let ((screen (charmed-port-screen port)))
+          (when screen
+            (update-terminal-cursor port)
+            (charmed:screen-present screen)))
+        (call-next-method))))
 
 ;;; Text cursor drawing — use the terminal's hardware cursor instead of
 ;;; McCLIM's graphical cursor rendering (draw-rectangle/draw-line).

@@ -37,6 +37,13 @@
          ;; Default vertical-spacing of 2 causes 3-row line height in a 1-cell terminal.
          (when (typep sheet 'clim-stream-pane)
            (setf (stream-vertical-spacing sheet) 0))
+         ;; Cap border-width on spacing/outlined/border panes to 1.
+         ;; In GUI backends border-width 2 means 2 pixels; in a terminal
+         ;; each unit is a full character row.  Cap at 1 so borders are
+         ;; still visible as pane dividers but don't waste screen space.
+         (when (and (typep sheet 'climi::spacing-pane)
+                    (> (slot-value sheet 'climi::border-width) 1))
+           (setf (slot-value sheet 'climi::border-width) 1))
          ;; Set queue-port on every sheet's event queue so that
          ;; queue-read/queue-listen-or-wait can call process-next-event.
          ;; Without this, default-frame-top-level's accept/read-gesture
@@ -52,10 +59,91 @@
 (defmethod note-frame-enabled
     ((fm charmed-frame-manager) (frame application-frame))
   (let ((tls (frame-top-level-sheet frame))
-        (size (charmed:terminal-size)))
+        (size (charmed:terminal-size))
+        (port (port fm)))
     (when tls
       (setf (sheet-enabled-p tls) t)
-      (layout-frame frame (first size) (second size)))))
+      (layout-frame frame (first size) (second size))
+      ;; Post-layout fix: clamp sheet transformations to terminal bounds.
+      ;; McCLIM's layout engine distributes space proportionally based on
+      ;; pixel-scale space requirements (e.g. :height 500).  In a terminal,
+      ;; each unit = 1 character row, so the main pane grabs ~65 of 51 rows
+      ;; and pushes the interactor off-screen.  Walk the tree and rewrite
+      ;; any transformation whose Y offset exceeds the terminal height.
+      (let ((th (second size))
+            (tw (first size)))
+        (map-over-sheets
+         (lambda (sheet)
+           (handler-case
+               (let ((tr (sheet-transformation sheet)))
+                 (when tr
+                   (multiple-value-bind (tx ty) (transform-position tr 0 0)
+                     (when (>= ty th)
+                       ;; This sheet is placed beyond the terminal.
+                       ;; Move it to leave room: place it so there are
+                       ;; at least a few rows visible for it.
+                       (let* ((sheet-h (handler-case
+                                           (bounding-rectangle-height (sheet-region sheet))
+                                         (error () 10)))
+                              (avail (max 3 (min (round sheet-h) (floor th 4))))
+                              (new-y (- th avail)))
+                         (setf (sheet-transformation sheet)
+                               (make-translation-transformation tx new-y))
+                         ;; Also resize the sheet region to fit the available space
+                         (handler-case
+                             (let ((w (bounding-rectangle-width (sheet-region sheet))))
+                               (setf (sheet-region sheet)
+                                     (make-bounding-rectangle 0 0 w avail)))
+                           (error () nil)))))))
+             (error () nil)))
+         tls))
+      ;; Ensure screen buffer covers the full laid-out content.
+      (when port
+        (let ((screen (charmed-port-screen port))
+              (max-row (second size)))
+          (when screen
+            (map-over-sheets
+             (lambda (sheet)
+               (handler-case
+                   (multiple-value-bind (sx sy) (sheet-screen-position-xy sheet)
+                     (declare (ignore sx))
+                     (let ((h (handler-case
+                                  (bounding-rectangle-height (sheet-region sheet))
+                                (error () 0))))
+                       (setf max-row (max max-row (round (+ sy h))))))
+                 (error () nil)))
+             tls)
+            (when (> max-row (charmed:screen-height screen))
+              (charmed:screen-resize screen
+                                     (max (first size) (charmed:screen-width screen))
+                                     max-row)))))
+      ;; Fix medium type: scroller/viewport reparenting during frame
+      ;; adoption and enabling degrafts and re-grafts sheets, which
+      ;; replaces our charmed-medium with basic-medium.  Force the
+      ;; correct medium type on all sheets now that the tree is stable.
+      (when port
+        (map-over-sheets
+         (lambda (sheet)
+           (when (and (typep sheet 'sheet-with-medium-mixin)
+                      (sheet-medium sheet)
+                      (not (typep (sheet-medium sheet) 'charmed-medium)))
+             (let ((old-medium (sheet-medium sheet))
+                   (new-medium (make-medium port sheet)))
+               (degraft-medium old-medium port sheet)
+               (deallocate-medium port old-medium)
+               (setf (climi::%sheet-medium sheet) new-medium)
+               (engraft-medium new-medium port sheet))))
+         tls))
+      ;; Initialize keyboard focus so that default-frame-top-level apps
+      ;; receive key events.  Prefer the interactor pane (where commands
+      ;; are typed); fall back to the first named pane.
+      (when (and port (null (port-keyboard-input-focus port)))
+        (let* ((panes (collect-frame-panes frame))
+               (interactor (find-if (lambda (p) (typep p 'interactor-pane))
+                                    panes)))
+          (when panes
+            (setf (port-keyboard-input-focus port)
+                  (or interactor (first panes)))))))))
 
 ;;; Draw separator lines between sibling panes (horizontal and vertical splits).
 (defun sheet-screen-position-xy (sheet)
@@ -98,22 +186,36 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                      (bounding-rectangle* region)
                    (declare (ignore x1 y1))
                    ;; Walk parent chain to get screen position NOW,
-                   ;; before display functions cause relayout
-                   (let ((sx 0) (sy 0))
-                     (loop for s = sheet then (sheet-parent s)
+                   ;; before display functions cause relayout.
+                   ;; Start from sheet-parent (the sheet's own transformation
+                   ;; may include content offsets from output recording).
+                   ;; Skip viewport-pane transformations which represent
+                   ;; content scrolling offset, not screen position.
+                   (let ((sx 0) (sy 0)
+                         (term-size (charmed:terminal-size)))
+                     (loop for s = (sheet-parent sheet) then (sheet-parent s)
                            while (and s (not (graftp s)))
                            do (handler-case
                                   (let ((tr (sheet-transformation s)))
-                                    (when tr
+                                    (when (and tr
+                                               (not (typep s 'climi::viewport-pane)))
                                       (multiple-value-bind (tx ty)
                                           (transform-position tr 0 0)
                                         (incf sx tx)
                                         (incf sy ty))))
                                 (error () (return))))
-                     (setf (gethash sheet table)
-                           (list sx sy x2 y2))))))
+                     ;; Clamp to terminal bounds: if the layout overflows
+                     ;; (e.g. outlined-pane at Y=66 in a 51-row terminal),
+                     ;; relocate so the pane starts within the visible area.
+                     ;; Ensure at least 3 rows are visible for the pane.
+                     (let* ((th (second term-size))
+                            (max-sy (max 0 (- th 3))))
+                       (when (> sy max-sy)
+                         (setf sy max-sy))
+                       (setf (gethash sheet table)
+                             (list sx sy x2 y2))))))))
            (error () nil))))
-     (frame-top-level-sheet frame))))
+     (frame-top-level-sheet frame)))
 
 ;;; Collect the named application panes (clim-stream-pane) for focus cycling.
 ;;; Sorted by frozen screen Y position so top pane comes first.
@@ -553,6 +655,40 @@ accumulating sheet-transformation offsets.  Stops at grafts."
              'charmed-port)
       nil
       (call-next-method)))
+
+;;; Scale pixel-sized space requirements to terminal-appropriate sizes.
+;;; GUI applications request dimensions like :height 500 (pixels), but in
+;;; a terminal each unit = 1 character cell.  Without clamping, a 500-row
+;;; main pane pushes the interactor off the 51-row terminal screen.
+;;; This override clamps requested dimensions to the terminal size.
+(defmethod compose-space :around ((pane clim-stream-pane) &key width height)
+  (let ((port (port pane)))
+    (if (typep port 'charmed-port)
+        (let* ((size (charmed:terminal-size))
+               (tw (first size))
+               (th (second size))
+               ;; Reserve rows for the interactor pane so it isn't
+               ;; squeezed out by the main application pane.
+               ;; Non-interactor panes get terminal height minus reserve;
+               ;; interactor panes get exactly the reserve amount.
+               (interactor-reserve (max 5 (floor th 6)))
+               (max-h (if (typep pane 'interactor-pane)
+                          interactor-reserve
+                          (- th interactor-reserve)))
+               ;; Clamp width/height keyword args
+               (cw (if width (min width tw) tw))
+               (ch (if height (min height max-h) max-h))
+               ;; Get the result from the primary method with clamped args
+               (sr (call-next-method pane :width cw :height ch)))
+          ;; Also clamp the resulting space requirement values
+          (make-space-requirement
+           :min-width  (min (space-requirement-min-width sr) tw)
+           :width      (min (space-requirement-width sr) tw)
+           :max-width  (min (space-requirement-max-width sr) tw)
+           :min-height (min (space-requirement-min-height sr) max-h)
+           :height     (min (space-requirement-height sr) max-h)
+           :max-height (min (space-requirement-max-height sr) th)))
+        (call-next-method))))
 
 ;;; Suppress space-requirements propagation for the charmed backend.
 ;;; Content expansion in stream panes must NOT trigger relayout, because:

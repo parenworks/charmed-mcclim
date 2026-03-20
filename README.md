@@ -29,6 +29,9 @@ Built on `charmed`, a pure-Lisp ANSI terminal library with double-buffered rende
 - **Presentation clicking preserves focus** — mouse click on a presentation invokes the translator without changing keyboard focus (interactor remains active for command processing)
 - **Terminal restoration** — always cleans up on exit or crash
 - **Basic-medium fallbacks** — terminal metrics and drawing work correctly even for panes that receive a `basic-medium` from nested layout composites
+- **Input echo** — DREI interactor input (typed characters, command prompts) correctly echoed in terminal via dispatch-repaint/repaint-sheet overrides and medium type fixup
+- **Layout clamping** — post-layout transformation rewriting ensures panes fit within terminal bounds even when McCLIM's GUI-oriented layout engine overflows (e.g., `:height 500` treated as 500 rows)
+- **Standard McCLIM examples** — test runner for summation, views, address-book, indentation, stream-test, and town-example
 
 ### CLIM-Inspired Framework (Phases 1–5)
 
@@ -62,6 +65,7 @@ The project also includes a standalone CLIM-inspired framework (`src/`) with its
 | `Backends/charmed/test-presentations.lisp` | Clickable fruit list — presentation translators, mouse click → command |
 | `Backends/charmed/test-listener.lisp` | Terminal Lisp Listener with eval, describe, package, help |
 | `Backends/charmed/test-real-listener.lisp` | Runs the real McCLIM Listener in terminal |
+| `Backends/charmed/test-mcclim-examples.lisp` | Standard McCLIM examples runner (summation, views, address-book, indentation, stream-test, town-example) |
 
 ## Dependencies
 
