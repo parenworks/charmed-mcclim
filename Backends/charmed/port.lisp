@@ -121,10 +121,24 @@
          (let ((event (translate-charmed-event port charmed-key)))
            (when event
              (distribute-event port event)
-             ;; Flush screen immediately after each event so that characters
-             ;; echoed by the input editor are visible without waiting for
-             ;; the next event cycle.
-             (port-force-output port))
+             ;; Flush screen after event distribution, but NOT during command
+             ;; reading for regular character keys — DREI will echo the
+             ;; character and present via display-drei :after.  Flushing
+             ;; here during command reading presents the screen BEFORE the
+             ;; character has been echoed, causing a one-behind artifact.
+             ;; Activation gestures (Enter, Tab) and non-character keys
+             ;; still flush, since they trigger command execution or
+             ;; completion which needs immediate screen update.
+             (let* ((skip-flush-p
+                      (and (typep event 'key-press-event)
+                           (let ((ch (keyboard-event-character event)))
+                             (and ch (graphic-char-p ch)))
+                           (let ((fm-0 (first (slot-value port 'climi::frame-managers))))
+                             (and fm-0
+                                  (let ((fr (first (frame-manager-frames fm-0))))
+                                    (and fr (climi::frame-reading-command-p fr))))))))
+               (unless skip-flush-p
+                 (port-force-output port))))
            (return (if event t (values nil :timeout)))))
         ((maybe-funcall wait-function)
          (return (values nil :wait-function)))
@@ -358,7 +372,10 @@ first frame's top-level-sheet, or the graft."
       (let ((screen (charmed-port-screen port)))
         (when screen
           (update-terminal-cursor port)
-          (charmed:screen-present screen))))))
+          ;; Force present — this is the authoritative flush after DREI
+          ;; finishes drawing.  Must not be throttled away or typed
+          ;; characters won't appear until the next event.
+          (charmed-throttled-present port screen :force t))))))
 
 ;;; Override dispatch-repaint for charmed-port sheets.
 ;;; McCLIM's dispatch-repaint on immediate-repainting-mixin checks
@@ -390,10 +407,23 @@ first frame's top-level-sheet, or the graft."
       (let ((screen (charmed-port-screen port)))
         (when screen
           (update-terminal-cursor port)
-          (charmed:screen-present screen))))))
+          (charmed-throttled-present port screen))))))
 
 (defmethod (setf port-keyboard-input-focus) (focus (port charmed-port))
   (setf (slot-value port 'climi::focused-sheet) focus))
+
+(defun charmed-throttled-present (port screen &key (min-interval-ms 8) force)
+  "Present SCREEN only if at least MIN-INTERVAL-MS milliseconds have elapsed
+   since the last present, or if FORCE is true.  Coalesces rapid consecutive
+   flushes (e.g. 5 per keystroke) into a single terminal write.
+   Default interval of 8ms ≈ 120fps — fast enough to feel instant but avoids
+   redundant back-to-back writes within the same event processing cycle."
+  (let* ((now (get-internal-real-time))
+         (last (charmed-port-last-present-time port))
+         (elapsed-ms (* (/ (- now last) internal-time-units-per-second) 1000)))
+    (when (or force (>= elapsed-ms min-interval-ms))
+      (charmed:screen-present screen)
+      (setf (charmed-port-last-present-time port) now))))
 
 (defmethod port-force-output ((port charmed-port))
   (let ((screen (charmed-port-screen port)))
@@ -406,7 +436,9 @@ first frame's top-level-sheet, or the graft."
               (let ((frame (first frames)))
                 (draw-pane-borders frame port)
                 (update-terminal-cursor port))))))
-      (charmed:screen-present screen))))
+      ;; port-force-output is an explicit flush request — always present.
+      ;; Must not be throttled away or command results won't appear.
+      (charmed-throttled-present port screen :force t))))
 
 (defmethod distribute-event :around ((port charmed-port) event)
   (when (typep event 'key-press-event)

@@ -351,10 +351,12 @@
                   (cons (+ col (length clipped-text)) row))
             ;; Flush immediately when DREI is editing so each keystroke
             ;; echo is visible without waiting for the next event cycle.
+            ;; This is the primary path for character echo — display-drei
+            ;; may not fire for every keystroke in default-frame-top-level.
             (let ((frame (pane-frame sheet)))
               (when (and frame (climi::frame-reading-command-p frame))
                 (update-terminal-cursor port)
-                (charmed:screen-present screen)))))))))
+                (charmed-throttled-present port screen :force t)))))))))
 
 (defmethod medium-draw-text* ((medium charmed-medium) string x y
                               start end
@@ -626,7 +628,7 @@
                    (charmed-port-screen port))))
     (when screen
       (update-terminal-cursor port)
-      (charmed:screen-present screen))))
+      (charmed-throttled-present port screen))))
 
 (defmethod medium-force-output ((medium charmed-medium))
   (let* ((port (port (medium-sheet medium)))
@@ -634,7 +636,7 @@
                    (charmed-port-screen port))))
     (when screen
       (update-terminal-cursor port)
-      (charmed:screen-present screen))))
+      (charmed-throttled-present port screen))))
 
 ;;; Catch-all: any basic-medium on a charmed-port sheet should also flush.
 ;;; This handles panes that get a basic-medium instead of charmed-medium
@@ -647,7 +649,7 @@
         (let ((screen (charmed-port-screen port)))
           (when screen
             (update-terminal-cursor port)
-            (charmed:screen-present screen)))
+            (charmed-throttled-present port screen)))
         (call-next-method))))
 
 (defmethod medium-force-output :around ((medium basic-medium))
@@ -658,7 +660,7 @@
         (let ((screen (charmed-port-screen port)))
           (when screen
             (update-terminal-cursor port)
-            (charmed:screen-present screen)))
+            (charmed-throttled-present port screen)))
         (call-next-method))))
 
 ;;; Text cursor drawing — use the terminal's hardware cursor instead of
