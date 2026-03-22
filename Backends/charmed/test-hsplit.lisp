@@ -56,11 +56,4 @@
   (:top-level (clim-charmed:charmed-frame-top-level)))
 
 (defun run ()
-  (let* ((port (make-instance 'clim-charmed::charmed-port
-                              :server-path '(:charmed)))
-         (fm (first (slot-value port 'climi::frame-managers))))
-    (unwind-protect
-         (let ((frame (make-application-frame 'hsplit-test
-                                              :frame-manager fm)))
-           (run-frame-top-level frame))
-      (climi::destroy-port port))))
+  (clim-charmed:run-frame-on-charmed 'hsplit-test))

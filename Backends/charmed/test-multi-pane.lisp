@@ -79,11 +79,4 @@
 ;;; Other keys are ignored.
 
 (defun run ()
-  (let* ((port (make-instance 'clim-charmed::charmed-port
-                              :server-path '(:charmed)))
-         (fm (first (slot-value port 'climi::frame-managers))))
-    (unwind-protect
-         (let ((frame (make-application-frame 'multi-pane-test
-                                              :frame-manager fm)))
-           (run-frame-top-level frame))
-      (climi::destroy-port port))))
+  (clim-charmed:run-frame-on-charmed 'multi-pane-test))

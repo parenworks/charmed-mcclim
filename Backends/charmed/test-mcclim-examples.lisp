@@ -92,59 +92,12 @@
                           :needs-interactor-queue-p
                           (example-entry-needs-interactor-queue-p entry))))
 
-(defun %find-climi-symbol (name)
-  "Find a symbol in McCLIM's internal package at runtime."
-  (let ((pkg (find-package "CLIM-INTERNALS")))
-    (unless pkg (setf pkg (find-package "CLIMI")))
-    (when pkg (find-symbol name pkg))))
-
-(defun %make-simple-queue (port)
-  "Create a CLIMI::SIMPLE-QUEUE instance at runtime."
-  (let ((class (find-class (or (%find-climi-symbol "SIMPLE-QUEUE")
-                               (error "Cannot find CLIMI::SIMPLE-QUEUE")))))
-    (make-instance class :port port)))
-
-(defun %destroy-port (port)
-  "Call CLIMI::DESTROY-PORT at runtime."
-  (let ((sym (%find-climi-symbol "DESTROY-PORT")))
-    (when (and sym (fboundp sym))
-      (funcall (symbol-function sym) port))))
-
-(defun %port-frame-managers (port)
-  "Access PORT's frame-managers slot at runtime."
-  (let ((sym (%find-climi-symbol "FRAME-MANAGERS")))
-    (when sym (slot-value port sym))))
-
 (defun run-frame-on-charmed (frame-class &key (needs-interactor-queue-p t))
-  "Create a charmed port, frame manager, and run FRAME-CLASS."
-  (let* ((charmed-port-class (find-class
-                              (or (let ((pkg (find-package "CLIM-CHARMED")))
-                                    (when pkg (find-symbol "CHARMED-PORT" pkg)))
-                                  (error "Cannot find CLIM-CHARMED:CHARMED-PORT"))))
-         (port (make-instance charmed-port-class
-                              :server-path '(:charmed)))
-         (fm (first (%port-frame-managers port))))
-    (unwind-protect
-         (if needs-interactor-queue-p
-             ;; Use simple-queue for apps with interactor panes
-             ;; (default-frame-top-level needs process-next-event pumping)
-             (let ((event-queue (%make-simple-queue port))
-                   (input-buffer (%make-simple-queue port)))
-               (let ((frame (clim:make-application-frame
-                             frame-class
-                             :frame-manager fm
-                             :frame-event-queue event-queue
-                             :frame-input-buffer input-buffer)))
-                 (clim:run-frame-top-level frame)))
-             ;; No interactor — still provide an event queue so the charmed
-             ;; event loop can process Ctrl-Q for clean exit.
-             (let ((event-queue (%make-simple-queue port)))
-               (let ((frame (clim:make-application-frame
-                             frame-class
-                             :frame-manager fm
-                             :frame-event-queue event-queue)))
-                 (clim:run-frame-top-level frame))))
-      (%destroy-port port))))
+  "Create a charmed port, frame manager, and run FRAME-CLASS.
+   Uses the public startup helpers from clim-charmed."
+  (if needs-interactor-queue-p
+      (clim-charmed:run-frame-on-charmed-with-interactor frame-class)
+      (clim-charmed:run-frame-on-charmed frame-class)))
 
 ;;; ============================================================
 ;;; Register known examples

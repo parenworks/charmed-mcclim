@@ -77,15 +77,4 @@
 
 ;;; Run function
 (defun run ()
-  (let* ((port (make-instance 'clim-charmed::charmed-port
-                              :server-path '(:charmed)))
-         (fm (first (slot-value port 'climi::frame-managers)))
-         (event-queue (make-instance 'climi::simple-queue :port port))
-         (input-buffer (make-instance 'climi::simple-queue :port port)))
-    (unwind-protect
-         (let ((frame (make-application-frame 'presentation-test
-                                              :frame-manager fm
-                                              :frame-event-queue event-queue
-                                              :frame-input-buffer input-buffer)))
-           (run-frame-top-level frame))
-      (climi::destroy-port port))))
+  (clim-charmed:run-frame-on-charmed-with-interactor 'presentation-test))

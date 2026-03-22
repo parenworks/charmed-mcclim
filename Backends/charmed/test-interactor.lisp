@@ -72,20 +72,6 @@
   "Run the interactor test application.
    If EXIT-LISP is true (default), exit SBCL when the frame is closed."
   (setf *message-count* 0)
-  (let* ((port (make-instance 'clim-charmed::charmed-port
-                              :server-path '(:charmed)))
-         (fm (first (slot-value port 'climi::frame-managers)))
-         ;; Use simple-queue so queue-read calls process-next-event
-         ;; to pump terminal input. concurrent-queue blocks on
-         ;; condition-wait expecting a separate event thread.
-         (event-queue (make-instance 'climi::simple-queue :port port))
-         (input-buffer (make-instance 'climi::simple-queue :port port)))
-    (unwind-protect
-         (let ((frame (make-application-frame 'interactor-test
-                                              :frame-manager fm
-                                              :frame-event-queue event-queue
-                                              :frame-input-buffer input-buffer)))
-           (run-frame-top-level frame))
-      (climi::destroy-port port)
-      (when exit-lisp
-        (uiop:quit 0)))))
+  (clim-charmed:run-frame-on-charmed-with-interactor
+   'interactor-test
+   :exit-on-close exit-lisp))

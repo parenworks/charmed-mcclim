@@ -12,6 +12,7 @@ built on [charmed](https://github.com/parenworks/charmed).
 ## Table of Contents
 
 - [Overview](#overview)
+- [Startup Helpers](#startup-helpers)
 - [Backend Classes](#backend-classes)
 - [Event Processing](#event-processing)
 - [Scrolling](#scrolling)
@@ -42,12 +43,64 @@ protocols, translating McCLIM drawing and event operations to charmed terminal I
 
 | Symbol | Type | Description |
 | ------ | ---- | ----------- |
+| `run-frame-on-charmed` | function | Run a frame on the charmed backend (simple apps) |
+| `run-frame-on-charmed-with-interactor` | function | Run a frame with interactor pane support |
 | `charmed-port` | class | McCLIM port — owns charmed screen, processes terminal input |
 | `charmed-medium` | class | Drawing medium — maps CLIM drawing ops to screen cells |
 | `charmed-frame-manager` | class | Frame lifecycle, layout, top-level event loop |
 | `charmed-frame-top-level` | function | Custom top-level loop for non-interactor apps |
 | `charmed-handle-key-event` | generic | Per-frame key event handler (used by `charmed-frame-top-level`) |
 | `charmed-frame-wants-raw-keys-p` | generic | Return T to receive arrow/scroll keys in frame event queue |
+
+---
+
+## Startup Helpers
+
+The simplest way to run a McCLIM application on the charmed backend:
+
+### run-frame-on-charmed
+
+```lisp
+(clim-charmed:run-frame-on-charmed frame-class &key width height frame-args new-process)
+```
+
+Run an application frame on the charmed terminal backend.
+
+**Arguments:**
+- `frame-class` — Symbol naming a `define-application-frame` class
+- `width`, `height` — Optional terminal size override (rarely needed)
+- `frame-args` — Plist of additional arguments to `make-application-frame`
+- `new-process` — If T, run in a separate thread (default: NIL)
+
+**Example:**
+```lisp
+(clim-charmed:run-frame-on-charmed 'my-app)
+(clim-charmed:run-frame-on-charmed 'my-app :frame-args '(:title "My App"))
+```
+
+### run-frame-on-charmed-with-interactor
+
+```lisp
+(clim-charmed:run-frame-on-charmed-with-interactor frame-class &key frame-args exit-on-close)
+```
+
+Run a frame that uses `default-frame-top-level` with an interactor pane. This variant
+creates the event queues needed for McCLIM's standard command loop (`accept`/`read-gesture`)
+to work correctly with the terminal.
+
+**Arguments:**
+- `frame-class` — Symbol naming a `define-application-frame` class with an `:interactor` pane
+- `frame-args` — Plist of additional arguments to `make-application-frame`
+- `exit-on-close` — If T, call `(uiop:quit 0)` after the frame closes
+
+**Example:**
+```lisp
+(clim-charmed:run-frame-on-charmed-with-interactor 'my-repl)
+```
+
+**When to use which:**
+- Use `run-frame-on-charmed` for simple display-only apps or apps using `charmed-frame-top-level`
+- Use `run-frame-on-charmed-with-interactor` for apps with command input (interactor pane, Listener-style apps)
 
 ---
 

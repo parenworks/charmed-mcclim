@@ -8,4 +8,7 @@
            #:charmed-medium
            #:charmed-frame-manager
            #:charmed-frame-wants-raw-keys-p
-           #:charmed-active-pane))
+           #:charmed-active-pane
+           ;; Startup helpers (Wave 6)
+           #:run-frame-on-charmed
+           #:run-frame-on-charmed-with-interactor))

@@ -20,16 +20,5 @@
 (in-package #:charmed-real-listener)
 
 (defun run ()
-  (let* ((port (make-instance 'clim-charmed::charmed-port
-                              :server-path '(:charmed)))
-         (fm (first (slot-value port 'climi::frame-managers)))
-         (event-queue (make-instance 'climi::simple-queue :port port))
-         (input-buffer (make-instance 'climi::simple-queue :port port)))
-    (unwind-protect
-         (let ((*package* (find-package :cl-user)))
-           (let ((frame (make-application-frame 'clim-listener::listener
-                                                :frame-manager fm
-                                                :frame-event-queue event-queue
-                                                :frame-input-buffer input-buffer)))
-             (run-frame-top-level frame)))
-      (climi::destroy-port port))))
+  (let ((*package* (find-package :cl-user)))
+    (clim-charmed:run-frame-on-charmed-with-interactor 'clim-listener::listener)))

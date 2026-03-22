@@ -4,7 +4,18 @@
 **Author:** Glenn Thompson  
 **Project:** `charmed-mcclim`  
 **Language:** Common Lisp  
-**Status:** Phases 1–5a complete; Phase 6 (McCLIM backend) substantially complete — McCLIM Listener running, presentation clicking, auto-scroll, multi-pane layout, input editing, color/style mapping, event distribution all working  
+**Status:** **Complete** — Full McCLIM terminal backend with Listener, presentations, DREI input editing, multi-pane layout, scrolling, focus, colors, mouse support, and 51 backend tests passing.
+
+---
+
+# Document Structure
+
+This document has two parts:
+
+1. **Current Architecture** (Phase 6) — The working McCLIM backend in `Backends/charmed/`
+2. **Historical Context** (Phases 1-5) — The standalone CLIM-inspired framework in `src/` that preceded the McCLIM backend
+
+**For new contributors:** Start with the [Phase 6 section](#phase-6-mcclim-backend-implementation) and the code in `Backends/charmed/`. The earlier phases document the historical standalone framework.
 
 ---
 

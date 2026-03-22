@@ -8,9 +8,31 @@ A terminal-native McCLIM backend for Common Lisp, built on [charmed](https://git
 
 Built on `charmed`, a pure-Lisp ANSI terminal library with double-buffered rendering, diff-based screen updates, and mouse support.
 
+## Repository Map
+
+```
+charmed-mcclim/
+├── Backends/charmed/           ← ACTIVE: McCLIM terminal backend
+│   ├── port.lisp               Port, event processing, terminal I/O
+│   ├── medium.lisp             Drawing, text, colors, inks
+│   ├── graft.lisp              Root sheet (terminal dimensions)
+│   ├── frame-manager.lisp      Frame/pane management, layout, focus
+│   ├── compat.lisp             McCLIM internal API compatibility layer
+│   ├── startup.lisp            User-facing startup helpers
+│   ├── tests/                  Backend test suite (51 tests)
+│   └── test-*.lisp             Example applications
+├── src/                        ← LEGACY: Standalone CLIM-inspired framework
+│   └── *.lisp                  (Phases 1-5, not McCLIM, historical)
+├── examples/                   ← LEGACY: Framework examples
+├── docs/API.md                 Backend API reference
+└── DESIGN.md                   Architecture documentation
+```
+
+**New contributors:** All active development is in `Backends/charmed/`. The `src/` directory contains a historical standalone framework that predates the McCLIM backend.
+
 ## Features
 
-### McCLIM Backend (Phase 6)
+### McCLIM Backend
 
 - **Full McCLIM backend** — port, graft, medium, frame-manager classes
 - **McCLIM Listener** — Lisp eval, describe, package commands working
@@ -37,7 +59,7 @@ Built on `charmed`, a pure-Lisp ANSI terminal library with double-buffered rende
 
 The project also includes a standalone CLIM-inspired framework (`src/`) with its own command tables, presentations, typed forms, and examples. This was the foundation before the McCLIM backend was built.
 
-## Quick Start (McCLIM Backend)
+## Quick Start
 
 ```lisp
 ;; Load charmed and the McCLIM backend
@@ -45,13 +67,25 @@ The project also includes a standalone CLIM-inspired framework (`src/`) with its
 (push #P"/path/to/charmed-mcclim/Backends/charmed/" asdf:*central-registry*)
 (asdf:load-system :mcclim-charmed)
 
-;; Run the presentation test (clickable items)
-(load "Backends/charmed/test-presentations.lisp")
-(charmed-presentation-test:run)
+;; Define your application frame
+(clim:define-application-frame my-app ()
+  ()
+  (:panes (display :application :display-function 'show-hello))
+  (:layouts (default display))
+  (:top-level (clim-charmed:charmed-frame-top-level)))
 
-;; Or run the Lisp Listener
-(load "Backends/charmed/test-listener.lisp")
-(clim-charmed-listener:run)
+(defun show-hello (frame pane)
+  (declare (ignore frame))
+  (format pane "Hello from the terminal!~%Press Ctrl-Q to exit."))
+
+;; Run it on the charmed backend
+(clim-charmed:run-frame-on-charmed 'my-app)
+```
+
+For frames with an interactor pane (command input):
+
+```lisp
+(clim-charmed:run-frame-on-charmed-with-interactor 'my-repl-app)
 ```
 
 ## Test Applications

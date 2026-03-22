@@ -9,4 +9,5 @@
    (:file "port" :depends-on ("compat" "package"))
    (:file "medium" :depends-on ("port" "compat" "package"))
    (:file "graft" :depends-on ("port" "package"))
-   (:file "frame-manager" :depends-on ("medium" "port" "compat" "package"))))
+   (:file "frame-manager" :depends-on ("medium" "port" "compat" "package"))
+   (:file "startup" :depends-on ("frame-manager" "port" "compat" "package"))))
