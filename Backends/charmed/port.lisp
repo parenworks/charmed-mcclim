@@ -54,7 +54,7 @@
   ;; Create graft and frame manager
   (make-graft port)
   (push (make-instance 'charmed-frame-manager :port port)
-        (slot-value port 'climi::frame-managers)))
+        (port-frame-managers port)))
 
 (defmethod destroy-port :before ((port charmed-port))
   (when (charmed-port-raw-mode-p port)
@@ -100,7 +100,7 @@
         (when screen
           (charmed:screen-resize screen width height))
         ;; Relayout all frames at the new terminal size
-        (let ((fm (first (slot-value port 'climi::frame-managers))))
+        (let ((fm (first (port-frame-managers port))))
           (when fm
             (dolist (frame (frame-manager-frames fm))
               (let ((tls (frame-top-level-sheet frame)))
@@ -150,10 +150,10 @@
                       (and (typep event 'key-press-event)
                            (let ((ch (keyboard-event-character event)))
                              (and ch (graphic-char-p ch)))
-                           (let ((fm-0 (first (slot-value port 'climi::frame-managers))))
+                           (let ((fm-0 (first (port-frame-managers port))))
                              (and fm-0
                                   (let ((fr (first (frame-manager-frames fm-0))))
-                                    (and fr (climi::frame-reading-command-p fr))))))))
+                                    (and fr (frame-reading-command-p fr))))))))
                (unless skip-flush-p
                  (port-force-output port))))
            (return (if event t (values nil :timeout)))))
@@ -174,12 +174,12 @@
   "Find the best sheet to target events at: the focused sheet, the
 first frame's top-level-sheet, or the graft."
   (or (port-keyboard-input-focus port)
-      (let ((fm (first (slot-value port 'climi::frame-managers))))
+      (let ((fm (first (port-frame-managers port))))
         (when fm
           (let ((frames (frame-manager-frames fm)))
             (when frames
               (frame-top-level-sheet (first frames))))))
-      (first (climi::port-grafts port))))
+      (first (port-grafts port))))
 
 (defun find-pane-at-screen-position (port screen-x screen-y)
   "Find the pane under screen coordinates (SCREEN-X, SCREEN-Y).
@@ -230,8 +230,7 @@ first frame's top-level-sheet, or the graft."
     ;; Explicitly set the pointer-event's sheet-x/sheet-y slots
     ;; (these shadow the device-event slots and are what
     ;;  pointer-event-x / pointer-event-y read).
-    (setf (slot-value event 'climi::sheet-x) local-x
-          (slot-value event 'climi::sheet-y) local-y)
+    (set-pointer-event-coordinates event local-x local-y)
     event))
 
 (defun translate-charmed-event (port charmed-key)
@@ -411,7 +410,7 @@ first frame's top-level-sheet, or the graft."
           (charmed-throttled-present port screen))))))
 
 (defmethod (setf port-keyboard-input-focus) (focus (port charmed-port))
-  (setf (slot-value port 'climi::focused-sheet) focus))
+  (set-port-focused-sheet port focus))
 
 (defun charmed-throttled-present (port screen &key (min-interval-ms 8) force)
   "Present SCREEN only if at least MIN-INTERVAL-MS milliseconds have elapsed
@@ -430,7 +429,7 @@ first frame's top-level-sheet, or the graft."
   (let ((screen (charmed-port-screen port)))
     (when screen
       ;; Draw borders and position cursor before presenting
-      (let ((fm (first (slot-value port 'climi::frame-managers))))
+      (let ((fm (first (port-frame-managers port))))
         (when fm
           (let ((frames (frame-manager-frames fm)))
             (when frames
@@ -446,7 +445,7 @@ first frame's top-level-sheet, or the graft."
     ;; Intercept Ctrl-Q globally as a quit signal
     (when (and (eql (keyboard-event-key-name event) :|Q|)
                (not (zerop (logand (event-modifier-state event) +control-key+))))
-      (let ((fm (first (slot-value port 'climi::frame-managers))))
+      (let ((fm (first (port-frame-managers port))))
         (when fm
           (let ((frames (frame-manager-frames fm)))
             (when frames
@@ -466,9 +465,9 @@ first frame's top-level-sheet, or the graft."
         (let ((frame (pane-frame focused)))
           (if (and frame (charmed-frame-wants-raw-keys-p frame))
               ;; Raw mode: queue directly to frame's event queue
-              (let ((queue (climi::frame-event-queue frame)))
+              (let ((queue (frame-event-queue frame)))
                 (when queue
-                  (climi::queue-append queue event)))
+                  (queue-append queue event)))
               ;; Normal mode: dispatch to focused pane for DREI
               (dispatch-event focused event)))))
     (return-from distribute-event))

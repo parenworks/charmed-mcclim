@@ -19,8 +19,7 @@
 ;;; This runs before the standard adopt-frame creates panes.
 (defmethod adopt-frame :before
     ((fm charmed-frame-manager) (frame application-frame))
-  (setf (slot-value frame 'climi::menu-bar) nil)
-  (setf (slot-value frame 'climi::pdoc-bar) nil))
+  (suppress-frame-gui-elements frame))
 
 ;;; After the standard adopt-frame creates panes, size the top-level
 ;;; sheet to fill the terminal.
@@ -41,17 +40,17 @@
          ;; In GUI backends border-width 2 means 2 pixels; in a terminal
          ;; each unit is a full character row.  Cap at 1 so borders are
          ;; still visible as pane dividers but don't waste screen space.
-         (when (and (typep sheet 'climi::spacing-pane)
-                    (> (slot-value sheet 'climi::border-width) 1))
-           (setf (slot-value sheet 'climi::border-width) 1))
+         (when (and (spacing-pane-p sheet)
+                    (> (spacing-pane-border-width sheet) 1))
+           (setf (spacing-pane-border-width sheet) 1))
          ;; Set queue-port on every sheet's event queue so that
          ;; queue-read/queue-listen-or-wait can call process-next-event.
          ;; Without this, default-frame-top-level's accept/read-gesture
          ;; would fail because the sheet queue's port is NIL.
-         (when (typep sheet 'climi::standard-sheet-input-mixin)
+         (when (standard-sheet-input-mixin-p sheet)
            (let ((q (sheet-event-queue sheet)))
-             (when (and q (typep q 'climi::simple-queue) (null (climi::queue-port q)))
-               (setf (climi::queue-port q) port)))))
+             (when (and q (simple-queue-p q) (null (queue-port q)))
+               (setf (queue-port q) port)))))
        tls))))
 
 ;;; After the frame is enabled and the top-level sheet made visible,
@@ -126,7 +125,7 @@
                    (new-medium (make-medium port sheet)))
                (degraft-medium old-medium port sheet)
                (deallocate-medium port old-medium)
-               (setf (climi::%sheet-medium sheet) new-medium)
+               (setf (sheet-medium-internal sheet) new-medium)
                (engraft-medium new-medium port sheet))))
          tls))
       ;; Initialize keyboard focus
@@ -510,7 +509,7 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     ;; they need to reach the interactor's input buffer.
     (when sheet
       (let ((frame (pane-frame sheet)))
-        (when (and frame (climi::frame-reading-command-p frame))
+        (when (and frame (frame-reading-command-p frame))
           (return-from charmed-intercept-key-event nil))
         ;; When the frame wants raw keys (e.g. browse mode), pass through
         (when (and frame (charmed-frame-wants-raw-keys-p frame))
@@ -579,7 +578,7 @@ accumulating sheet-transformation offsets.  Stops at grafts."
       (process-next-event port :timeout 0.05)
       ;; Drain queued events from all panes, but only when NOT reading a command.
       ;; During accept/read-gesture, events must stay in the queue for DREI to read.
-      (unless (climi::frame-reading-command-p frame)
+      (unless (frame-reading-command-p frame)
         (dolist (pane (collect-frame-panes frame))
           (loop for event = (event-read-no-hang pane)
                 while event
@@ -659,7 +658,7 @@ accumulating sheet-transformation offsets.  Stops at grafts."
              (let* ((arg-p (consp command-args))
                     (arg (pop command-args))
                     (missingp (or (null arg-p)
-                                  (climi::unsupplied-argument-p arg))))
+                                  (unsupplied-argument-p arg))))
                (if missingp
                    (let ((value (apply #'accept ptype :stream stream args)))
                      (push value collected)
@@ -674,7 +673,7 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                         (encapsulating-stream-stream stream)
                         stream)))
         (fresh-line target)
-        (climi::parse-command command-name #'arg-parser #'del-parser target)))
+        (parse-command command-name #'arg-parser #'del-parser target)))
     `(,command-name ,@(nreverse collected))))
 
 
@@ -732,6 +731,8 @@ accumulating sheet-transformation offsets.  Stops at grafts."
   (declare (ignore pane))
   ())
 
+;; Note: We can't use composite-pane-p here because this is a method specializer.
+;; The climi::composite-pane reference must remain for CLOS dispatch.
 (defmethod note-space-requirements-changed ((pane climi::composite-pane) (changed pane))
   "For charmed backend, suppress relayout propagation from content expansion.
    The pane's own sheet-region is allowed to expand (so we can measure content

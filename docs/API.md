@@ -773,6 +773,83 @@ Vertical separator lines (`┃`) are drawn between horizontally split panes.
 
 ---
 
+## McCLIM Internal API Compatibility Layer
+
+The charmed backend requires access to several McCLIM internal APIs (`climi::` package)
+because it is a "mirrorless" port — no window system mirrors, no per-sheet native
+windows, and no pixel-based coordinate system. Many McCLIM internal APIs assume
+mirror-based backends (X11, GTK, etc.), so workarounds are necessary.
+
+All internal API accesses are isolated in `compat.lisp` with documented helper
+functions. This serves three purposes:
+
+1. **Document WHY** each internal API access is needed
+2. **Isolate** raw `slot-value` calls behind named functions
+3. **Centralize breakpoints** for future McCLIM version upgrades
+
+### Categories of Workarounds
+
+| Category | Internal APIs | Purpose |
+|----------|--------------|---------|
+| **Port** | `frame-managers`, `port-grafts`, `focused-sheet` | Access frame managers, grafts, direct focus control |
+| **Frame** | `menu-bar`, `pdoc-bar`, `frame-event-queue`, `frame-reading-command-p` | Suppress GUI elements, raw key mode, DREI detection |
+| **Sheet** | `%sheet-medium`, `sheet-x`/`sheet-y` on pointer events | Medium replacement after reparenting, pointer coordinates |
+| **Pane** | `spacing-pane`, `viewport-pane`, `composite-pane` | Border width capping, coordinate transform skipping, relayout suppression |
+| **Queue** | `simple-queue`, `queue-port`, `queue-append` | Event queue wiring, direct event insertion |
+| **Ink** | `indirect-ink`, `over-compositum`, `masked-compositum` | Unwrap composite inks to extract colors |
+| **DREI** | `display-drei :after`, `standard-text-cursor` | Reliable flush point, hardware cursor |
+| **Parser** | `unsupplied-argument-p`, `parse-command` | Partial command argument detection |
+
+### Helper Functions (compat.lisp)
+
+**Port helpers:**
+- `port-frame-managers` / `(setf port-frame-managers)` — access frame managers list
+- `port-grafts` — access grafts list
+- `set-port-focused-sheet` — direct focus control without side effects
+
+**Frame helpers:**
+- `suppress-frame-gui-elements` — nil out menu-bar and pdoc-bar slots
+- `frame-event-queue` — access frame's event queue for raw key mode
+- `frame-reading-command-p` — detect when DREI is active
+
+**Sheet helpers:**
+- `sheet-medium-internal` / `(setf sheet-medium-internal)` — access %sheet-medium slot
+- `set-pointer-event-coordinates` — set sheet-x/sheet-y on pointer events
+
+**Pane helpers:**
+- `spacing-pane-p`, `spacing-pane-border-width` — check and cap border width
+- `viewport-pane-p` — skip in coordinate transforms
+- `composite-pane-p` — target for relayout suppression
+
+**Queue helpers:**
+- `standard-sheet-input-mixin-p`, `simple-queue-p` — type checks
+- `queue-port` / `(setf queue-port)` — wire queues to port
+- `queue-append` — direct event insertion
+
+**Ink helpers:**
+- `indirect-ink-p`, `indirect-ink-ink` — unwrap indirect inks
+- `over-compositum-p`, `compositum-foreground` — unwrap over composita
+- `masked-compositum-p`, `compositum-ink` — unwrap masked composita
+
+**Other helpers:**
+- `standard-text-cursor-p` — suppress graphical cursor drawing
+- `unsupplied-argument-p` — detect missing partial command arguments
+- `parse-command` — build command from collected arguments
+
+### Maintenance Notes
+
+When upgrading McCLIM:
+1. Check if any `climi::` symbols have been removed or renamed
+2. Check if public APIs have been added for any of these operations
+3. Update the helpers and their documentation accordingly
+4. Run the test suite: `(asdf:test-system :mcclim-charmed)`
+
+Two `climi::` references must remain as CLOS method specializers:
+- `climi::composite-pane` in `note-space-requirements-changed` (frame-manager.lisp)
+- `climi::standard-text-cursor` in `draw-design` (medium.lisp)
+
+---
+
 ## Legacy CLIM-Inspired Framework (Phases 1–5)
 
 The `src/` directory contains an earlier standalone CLIM-inspired framework with

@@ -75,8 +75,9 @@ The project also includes a standalone CLIM-inspired framework (`src/`) with its
 
 ## Documentation
 
-- **[docs/API.md](docs/API.md)** — McCLIM backend API reference (port, medium, graft, frame-manager, event processing, scrolling, focus, presentations)
+- **[docs/API.md](docs/API.md)** — McCLIM backend API reference (port, medium, graft, frame-manager, event processing, scrolling, focus, presentations, compatibility layer)
 - **[DESIGN.md](DESIGN.md)** — Architecture, coordinate pipeline, event model, and implementation details
+- **[Backends/charmed/compat.lisp](Backends/charmed/compat.lisp)** — McCLIM internal API compatibility layer (documents all `climi::` workarounds)
 - **[TODO.md](TODO.md)** — Current status and remaining work
 - **[examples/README.md](examples/README.md)** — CLIM-inspired framework examples (Phases 1–5)
 

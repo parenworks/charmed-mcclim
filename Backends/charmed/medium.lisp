@@ -128,14 +128,14 @@
         ((eq ink +foreground-ink+) nil)
         ((eq ink +background-ink+) nil)
         ;; Indirect ink — unwrap
-        ((typep ink 'climi::indirect-ink)
-         (resolve-ink (climi::indirect-ink-ink ink)))
+        ((indirect-ink-p ink)
+         (resolve-ink (indirect-ink-ink ink)))
         ;; Over-compositum — use the foreground design
-        ((typep ink 'climi::over-compositum)
-         (resolve-ink (climi::compositum-foreground ink)))
+        ((over-compositum-p ink)
+         (resolve-ink (compositum-foreground ink)))
         ;; In-compositum / masked-compositum — use the ink design
-        ((typep ink 'climi::masked-compositum)
-         (resolve-ink (climi::compositum-ink ink)))
+        ((masked-compositum-p ink)
+         (resolve-ink (compositum-ink ink)))
         ;; Color — return as-is
         ((typep ink 'color) ink)
         ;; Anything else — nil
@@ -221,7 +221,7 @@
                    (when (and tr
                               ;; Skip viewport transformations — they represent
                               ;; content scrolling offset, not screen position.
-                              (not (typep s 'climi::viewport-pane)))
+                              (not (viewport-pane-p s)))
                      (multiple-value-bind (tx ty) (transform-position tr 0 0)
                        (incf sx tx)
                        (incf sy ty))))
@@ -354,7 +354,7 @@
             ;; This is the primary path for character echo — display-drei
             ;; may not fire for every keystroke in default-frame-top-level.
             (let ((frame (pane-frame sheet)))
-              (when (and frame (climi::frame-reading-command-p frame))
+              (when (and frame (frame-reading-command-p frame))
                 (update-terminal-cursor port)
                 (charmed-throttled-present port screen :force t)))))))))
 
@@ -660,6 +660,8 @@
 
 ;;; Text cursor drawing — use the terminal's hardware cursor instead of
 ;;; McCLIM's graphical cursor rendering (draw-rectangle/draw-line).
+;;; Note: climi::standard-text-cursor must remain as method specializer for CLOS dispatch.
+;;; See compat.lisp for documentation of this internal class.
 (defmethod draw-design ((sheet clim-stream-pane) (cursor climi::standard-text-cursor)
                         &rest args)
   (declare (ignore args))

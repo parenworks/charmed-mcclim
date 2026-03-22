@@ -5,7 +5,8 @@
   :depends-on ("clim" "charmed")
   :components
   ((:file "package")
-   (:file "port" :depends-on ("package"))
-   (:file "medium" :depends-on ("port" "package"))
+   (:file "compat" :depends-on ("package"))
+   (:file "port" :depends-on ("compat" "package"))
+   (:file "medium" :depends-on ("port" "compat" "package"))
    (:file "graft" :depends-on ("port" "package"))
-   (:file "frame-manager" :depends-on ("medium" "port" "package"))))
+   (:file "frame-manager" :depends-on ("medium" "port" "compat" "package"))))
