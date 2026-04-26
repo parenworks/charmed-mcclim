@@ -919,7 +919,7 @@
            ;; Edit mode — delegate to framework
            ((slot-form-editing-p)
             (when *slot-form*
-              (fps-handle-key *slot-form* event)
+              (fps-handle-key *slot-form* event *slots-pane*)
               ;; Sync selection back from form state
               (setf *selected-slot* (form-pane-state-selected *slot-form*))
               (mark-all-dirty)
