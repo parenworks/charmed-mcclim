@@ -37,8 +37,8 @@ run on charmed (terminal), CLX (X11), etc.
 
 ## Remaining Work ❌
 
-- **test-multi-pane `run-standard`** — not yet tested
-- **test-interactor `run-standard`** — not yet tested
+- **test-multi-pane `run-standard`** — tested, works
+- **test-interactor `run-standard`** — tested, works
 - **Scrolling performance** — slightly sluggish with 100+ lines of content;
   visible-band replay helps but could be optimized further
 - **Clean up `debug-hello.lisp`** — debug script, can be deleted
@@ -86,21 +86,21 @@ cd ~/SourceCode/charmed-mcclim && sbcl --eval '(ql:quickload :mcclim :silent t)'
   --load Backends/charmed/test-hello.lisp \
   --eval '(clim-charmed-test::run-standard)'
 
-# test-hsplit (Ctrl-Q and Tab work, scroll DOES NOT)
+# test-hsplit (WORKS — scroll, Tab, Ctrl-Q all working)
 cd ~/SourceCode/charmed-mcclim && sbcl --eval '(ql:quickload :mcclim :silent t)' \
   --eval '(push #P"Backends/charmed/" asdf:*central-registry*)' \
   --eval '(asdf:load-system :mcclim-charmed)' \
   --load Backends/charmed/test-hsplit.lisp \
   --eval '(clim-charmed-test-hs::run-standard)'
 
-# test-multi-pane (NOT YET TESTED)
+# test-multi-pane (WORKS)
 cd ~/SourceCode/charmed-mcclim && sbcl --eval '(ql:quickload :mcclim :silent t)' \
   --eval '(push #P"Backends/charmed/" asdf:*central-registry*)' \
   --eval '(asdf:load-system :mcclim-charmed)' \
   --load Backends/charmed/test-multi-pane.lisp \
   --eval '(clim-charmed-test-mp::run-standard)'
 
-# test-interactor (NOT YET TESTED)
+# test-interactor (WORKS)
 cd ~/SourceCode/charmed-mcclim && sbcl --eval '(ql:quickload :mcclim :silent t)' \
   --eval '(push #P"Backends/charmed/" asdf:*central-registry*)' \
   --eval '(asdf:load-system :mcclim-charmed)' \
