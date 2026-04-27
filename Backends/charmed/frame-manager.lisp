@@ -14,11 +14,27 @@
 (defclass charmed-frame-manager (standard-frame-manager)
   ())
 
-;;; Suppress menu bar and pointer-documentation pane for the terminal.
+;;; Ensure the frame uses simple-queue (not concurrent-queue) for event
+;;; processing.  concurrent-queue blocks on a condition variable waiting
+;;; for events to be pushed from a separate thread.  The charmed backend
+;;; has no event thread — terminal input is pumped synchronously through
+;;; process-next-event, which simple-queue calls automatically.
+;;; Also suppress menu bar and pointer-documentation pane for the terminal.
 ;;; Menu bar gadgets are not usable without mouse and waste screen rows.
 ;;; This runs before the standard adopt-frame creates panes.
 (defmethod adopt-frame :before
     ((fm charmed-frame-manager) (frame application-frame))
+  (let ((port (port fm)))
+    ;; Replace concurrent queues with simple queues for terminal event pumping.
+    ;; McCLIM defaults to concurrent-queue when *multiprocessing-p* is true,
+    ;; but the charmed backend needs simple-queue which calls process-next-event
+    ;; to poll terminal input.
+    (when (frame-event-queue frame)
+      (setf (frame-event-queue frame)
+            (ensure-simple-queue (frame-event-queue frame) port)))
+    (when (frame-input-buffer frame)
+      (setf (frame-input-buffer frame)
+            (ensure-simple-queue (frame-input-buffer frame) port))))
   (suppress-frame-gui-elements frame))
 
 ;;; After the standard adopt-frame creates panes, size the top-level
@@ -43,14 +59,20 @@
          (when (and (spacing-pane-p sheet)
                     (> (spacing-pane-border-width sheet) 1))
            (setf (spacing-pane-border-width sheet) 1))
-         ;; Set queue-port on every sheet's event queue so that
-         ;; queue-read/queue-listen-or-wait can call process-next-event.
-         ;; Without this, default-frame-top-level's accept/read-gesture
-         ;; would fail because the sheet queue's port is NIL.
+         ;; Ensure every sheet has a simple-queue with queue-port wired.
+         ;; concurrent-queue blocks on a condition variable and deadlocks
+         ;; in the single-threaded terminal event loop.  make-pane-1
+         ;; should have already inherited the frame's simple-queue, but
+         ;; replace any concurrent-queue survivors as a safety net.
          (when (standard-sheet-input-mixin-p sheet)
            (let ((q (sheet-event-queue sheet)))
-             (when (and q (simple-queue-p q) (null (queue-port q)))
-               (setf (queue-port q) port)))))
+             (when q
+               (cond ((concurrent-queue-p q)
+                      (let ((sq (make-simple-queue port)))
+                        (set-sheet-event-queue sheet sq)))
+                     ((simple-queue-p q)
+                      (when (null (queue-port q))
+                        (setf (queue-port q) port))))))))
        tls))))
 
 ;;; After the frame is enabled and the top-level sheet made visible,

@@ -120,8 +120,27 @@
    WHY INTERNAL: climi::frame-event-queue is internal.
    
    WHY WE NEED IT: In raw key mode, we queue events directly to the frame's
-   queue so read-frame-command can dequeue them (bypassing per-pane dispatch)."
+   queue so read-frame-command can dequeue them (bypassing per-pane dispatch).
+   Also used in adopt-frame to replace concurrent-queue with simple-queue."
   (climi::frame-event-queue frame))
+
+(defun (setf frame-event-queue) (value frame)
+  "Set the event queue for FRAME."
+  (setf (climi::frame-event-queue frame) value))
+
+(defun frame-input-buffer (frame)
+  "Return the input buffer queue for FRAME.
+   
+   WHY INTERNAL: climi::frame-input-buffer is internal.
+   
+   WHY WE NEED IT: The charmed backend must replace the default concurrent-queue
+   input buffer with a simple-queue during adopt-frame, so that read-gesture
+   can pump terminal input via process-next-event."
+  (climi::frame-input-buffer frame))
+
+(defun (setf frame-input-buffer) (value frame)
+  "Set the input buffer queue for FRAME."
+  (setf (climi::frame-input-buffer frame) value))
 
 (defun frame-reading-command-p (frame)
   "Return T if FRAME is currently reading a command (DREI is active).
@@ -217,15 +236,38 @@
    queues so process-next-event can pump terminal input."
   (typep sheet 'climi::standard-sheet-input-mixin))
 
+(defun set-sheet-event-queue (sheet queue)
+  "Replace the event queue on SHEET.
+   
+   WHY INTERNAL: The event-queue slot on standard-sheet-input-mixin
+   only has a :reader (sheet-event-queue), no :writer or :accessor.
+   
+   WHY WE NEED IT: The charmed backend must replace concurrent-queue
+   instances on sheets with simple-queue to avoid deadlocks.  Sheets
+   created during adopt-frame inherit the frame's event queue via
+   make-pane-1, but some (e.g. scroller internals) may still have
+   concurrent-queue from their initform."
+  (setf (slot-value sheet 'climi::event-queue) queue))
+
 (defun simple-queue-p (queue)
-  "Return T if QUEUE is a simple-queue.
+  "Return T if QUEUE is exactly a simple-queue (not concurrent-queue).
    
    WHY INTERNAL: climi::simple-queue is internal.
    
    WHY WE NEED IT: simple-queue calls process-next-event to pump input;
    concurrent-queue blocks on a condition variable. We need simple-queue
-   for terminal event processing."
-  (typep queue 'climi::simple-queue))
+   for terminal event processing.
+   
+   NOTE: concurrent-queue inherits from simple-queue, so we check the
+   exact type to distinguish them."
+  (eq (type-of queue) 'climi::simple-queue))
+
+(defun concurrent-queue-p (queue)
+  "Return T if QUEUE is a concurrent-queue.
+   concurrent-queue blocks on a condition variable and requires a
+   separate event processing thread to push events. The charmed backend
+   has no such thread, so these must be replaced with simple-queue."
+  (typep queue 'climi::concurrent-queue))
 
 (defun queue-port (queue)
   "Return the port associated with QUEUE."
@@ -237,6 +279,28 @@
    WHY WE NEED IT: Without this, default-frame-top-level's accept/read-gesture
    fails because the sheet queue's port is NIL and can't pump events."
   (setf (climi::queue-port queue) port))
+
+(defun make-simple-queue (port)
+  "Create a simple-queue wired to PORT.
+   
+   WHY INTERNAL: climi::simple-queue is internal.
+   
+   WHY WE NEED IT: The charmed backend requires simple-queue (not
+   concurrent-queue) for both frame event queues and input buffers.
+   simple-queue calls process-next-event to pump terminal input;
+   concurrent-queue blocks on a condition variable, which deadlocks
+   because the charmed backend has no separate event processing thread."
+  (make-instance 'climi::simple-queue :port port))
+
+(defun ensure-simple-queue (queue port)
+  "If QUEUE is not a simple-queue, return a new simple-queue wired to PORT.
+   If it is already a simple-queue, just ensure queue-port is set and return it."
+  (if (simple-queue-p queue)
+      (progn
+        (when (null (queue-port queue))
+          (setf (queue-port queue) port))
+        queue)
+      (make-simple-queue port)))
 
 (defun queue-append (queue event)
   "Append EVENT to QUEUE.
