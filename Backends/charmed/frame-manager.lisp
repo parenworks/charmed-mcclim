@@ -14,27 +14,16 @@
 (defclass charmed-frame-manager (standard-frame-manager)
   ())
 
-;;; Ensure the frame uses simple-queue (not concurrent-queue) for event
-;;; processing.  concurrent-queue blocks on a condition variable waiting
-;;; for events to be pushed from a separate thread.  The charmed backend
-;;; has no event thread — terminal input is pumped synchronously through
-;;; process-next-event, which simple-queue calls automatically.
-;;; Also suppress menu bar and pointer-documentation pane for the terminal.
+;;; Suppress menu bar and pointer-documentation pane for the terminal.
 ;;; Menu bar gadgets are not usable without mouse and waste screen rows.
 ;;; This runs before the standard adopt-frame creates panes.
+;;;
+;;; No queue replacement needed: the port's I/O thread (started by
+;;; restart-port) pumps terminal input and pushes events to
+;;; concurrent-queue instances, signaling their condition variables.
+;;; The main thread's blocking queue-read wakes naturally.
 (defmethod adopt-frame :before
     ((fm charmed-frame-manager) (frame application-frame))
-  (let ((port (port fm)))
-    ;; Replace concurrent queues with simple queues for terminal event pumping.
-    ;; McCLIM defaults to concurrent-queue when *multiprocessing-p* is true,
-    ;; but the charmed backend needs simple-queue which calls process-next-event
-    ;; to poll terminal input.
-    (when (frame-event-queue frame)
-      (setf (frame-event-queue frame)
-            (ensure-simple-queue (frame-event-queue frame) port)))
-    (when (frame-input-buffer frame)
-      (setf (frame-input-buffer frame)
-            (ensure-simple-queue (frame-input-buffer frame) port))))
   (suppress-frame-gui-elements frame))
 
 ;;; After the standard adopt-frame creates panes, size the top-level
@@ -59,20 +48,14 @@
          (when (and (spacing-pane-p sheet)
                     (> (spacing-pane-border-width sheet) 1))
            (setf (spacing-pane-border-width sheet) 1))
-         ;; Ensure every sheet has a simple-queue with queue-port wired.
-         ;; concurrent-queue blocks on a condition variable and deadlocks
-         ;; in the single-threaded terminal event loop.  make-pane-1
-         ;; should have already inherited the frame's simple-queue, but
-         ;; replace any concurrent-queue survivors as a safety net.
+         ;; Wire queue-port on sheet event queues for port-force-output.
+         ;; concurrent-queue inherits queue-port from simple-queue.
+         ;; The I/O thread signals condition variables via queue-append;
+         ;; queue-port is used by do-port-force-output to flush the screen.
          (when (standard-sheet-input-mixin-p sheet)
            (let ((q (sheet-event-queue sheet)))
-             (when q
-               (cond ((concurrent-queue-p q)
-                      (let ((sq (make-simple-queue port)))
-                        (set-sheet-event-queue sheet sq)))
-                     ((simple-queue-p q)
-                      (when (null (queue-port q))
-                        (setf (queue-port q) port))))))))
+             (when (and q (null (queue-port q)))
+               (setf (queue-port q) port)))))
        tls))))
 
 ;;; After the frame is enabled and the top-level sheet made visible,
@@ -524,7 +507,11 @@ accumulating sheet-transformation offsets.  Stops at grafts."
 (defun charmed-intercept-key-event (port event)
   "Handle charmed-specific key events.  Returns T if the event was consumed.
    When the frame is reading a command (inside accept/read-gesture),
-   let Tab and arrow keys pass through to the input editor."
+   let Tab and arrow keys pass through to the input editor.
+   
+   NOTE: This runs on the I/O thread.  It must NOT perform screen writes.
+   It only modifies state (scroll offsets, focus); the main thread will
+   redisplay on its next cycle."
   (let ((key-name (keyboard-event-key-name event))
         (sheet (port-keyboard-input-focus port)))
     ;; When the frame is reading a command, don't intercept navigation keys —
@@ -536,49 +523,39 @@ accumulating sheet-transformation offsets.  Stops at grafts."
         ;; When the frame wants raw keys (e.g. browse mode), pass through
         (when (and frame (charmed-frame-wants-raw-keys-p frame))
           (return-from charmed-intercept-key-event nil))))
-    (flet ((redisplay-and-present ()
-             (when sheet
-               (let ((frame (pane-frame sheet)))
-                 (when frame
-                   (pre-clear-dirty-panes frame port)
-                   (redisplay-frame-panes frame)
-                   (port-force-output port))))))
-      (cond
-        ;; Tab cycles focus (only in charmed-frame-top-level;
-        ;; in default-frame-top-level, Tab passes through to DREI completion)
-        ((and (eql key-name :tab)
-              (charmed-port-custom-top-level-p port))
-         (when sheet
-           (let ((frame (pane-frame sheet)))
-             (when frame
-               (cycle-focus frame port)
-               (redisplay-and-present))))
-         t)
-        ;; Up/Down scroll by 1 line
-        ((eql key-name :up)
-         (when sheet (scroll-pane port sheet -1) (redisplay-and-present))
-         t)
-        ((eql key-name :down)
-         (when sheet (scroll-pane port sheet 1) (redisplay-and-present))
-         t)
-        ;; PgUp/PgDn scroll by page
-        ((eql key-name :prior)
-         (when sheet (scroll-pane port sheet (- (pane-height sheet))) (redisplay-and-present))
-         t)
-        ((eql key-name :next)
-         (when sheet (scroll-pane port sheet (pane-height sheet)) (redisplay-and-present))
-         t)
-        ;; Everything else passes through
-        (t nil)))))
+    (cond
+      ;; Tab cycles focus (only in charmed-frame-top-level;
+      ;; in default-frame-top-level, Tab passes through to DREI completion)
+      ((and (eql key-name :tab)
+            (charmed-port-custom-top-level-p port))
+       (when sheet
+         (let ((frame (pane-frame sheet)))
+           (when frame
+             (cycle-focus frame port))))
+       t)
+      ;; Up/Down scroll by 1 line
+      ((eql key-name :up)
+       (when sheet (scroll-pane port sheet -1))
+       t)
+      ((eql key-name :down)
+       (when sheet (scroll-pane port sheet 1))
+       t)
+      ;; PgUp/PgDn scroll by page
+      ((eql key-name :prior)
+       (when sheet (scroll-pane port sheet (- (pane-height sheet))))
+       t)
+      ((eql key-name :next)
+       (when sheet (scroll-pane port sheet (pane-height sheet)))
+       t)
+      ;; Everything else passes through
+      (t nil))))
 
 (defun charmed-frame-top-level (frame &key &allow-other-keys)
   "Top-level loop for frames on the charmed terminal backend.
-   Events flow through McCLIM's standard distribution:
-   process-next-event → distribute-event → dispatch-event → queue.
-   Terminal-specific keys (Ctrl-Q, Ctrl-Tab, PgUp/PgDn) are intercepted
-   in distribute-event :around before reaching the queue.
-   Remaining events are read from the queue and dispatched to the frame
-   via charmed-handle-key-event."
+   The port's I/O thread reads terminal input and distributes events to
+   sheet event queues.  Terminal-specific keys (Ctrl-Q, scroll, Tab focus)
+   are intercepted in distribute-event :around before reaching queues.
+   This loop reads queued events and dispatches them to the frame."
   (let* ((fm (frame-manager frame))
          (port (port fm)))
     ;; Signal that the custom top-level is active — Tab cycles focus
@@ -591,28 +568,28 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     ;; Initial display (pre-clear and viewport capture happen in :before method)
     (redisplay-frame-panes frame :force-p t)
     (port-force-output port)
-    ;; Event loop — pump events through McCLIM's standard distribution,
-    ;; then drain whatever reached each pane's event queue.
+    ;; Event loop — read events from the frame's event queue (populated by
+    ;; the I/O thread) and dispatch them.  Use read-no-hang + sleep to avoid
+    ;; blocking forever, allowing periodic redisplay for scroll/focus changes
+    ;; that the I/O thread applied without triggering screen writes.
     (loop
-      ;; Pump terminal input through process-next-event → distribute-event.
-      ;; Terminal-specific keys are consumed in distribute-event :around;
-      ;; everything else lands in the focused pane's event queue.
-      (process-next-event port :timeout 0.05)
-      ;; Drain queued events from all panes, but only when NOT reading a command.
-      ;; During accept/read-gesture, events must stay in the queue for DREI to read.
-      (unless (frame-reading-command-p frame)
-        (dolist (pane (collect-frame-panes frame))
-          (loop for event = (event-read-no-hang pane)
+        ;; Drain queued events, but only when NOT reading a command.
+        ;; During accept/read-gesture, events must stay in the queue for DREI.
+        (unless (frame-reading-command-p frame)
+          (loop for event = (event-read-no-hang (first (collect-frame-panes frame)))
                 while event
                 do (cond
                      ((typep event 'key-press-event)
                       (charmed-handle-key-event frame event
                                                 (port-keyboard-input-focus port)))
                      (t
-                      (handle-event (event-sheet event) event))))))
-      ;; Redisplay (pre-clear and viewport capture happen in :before method)
-      (redisplay-frame-panes frame)
-      (port-force-output port))))
+                      (handle-event (event-sheet event) event)))))
+        ;; Redisplay (pre-clear and viewport capture happen in :before method)
+        (redisplay-frame-panes frame)
+        (port-force-output port)
+        ;; Brief sleep to avoid busy-waiting — the I/O thread pushes events
+        ;; at terminal input rate.
+        (sleep 0.02))))
 
 ;;; Hook into redisplay to capture viewport sizes and pre-clear dirty panes.
 ;;; This ensures correct behavior regardless of which top-level loop is used
@@ -624,6 +601,8 @@ accumulating sheet-transformation offsets.  Stops at grafts."
       (let* ((fm (frame-manager frame))
              (port (when fm (port fm))))
         (when (and port (typep port 'charmed-port))
+          ;; Apply any pending resize from the I/O thread
+          (%apply-pending-resize port)
           (capture-pane-viewport-sizes frame port)
           (pre-clear-dirty-panes frame port)))
     (error () nil)))

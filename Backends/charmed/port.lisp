@@ -30,7 +30,10 @@
                   :documentation "Per-pane (col . row) of the end of the last drawn text, for cursor tracking during input editing.")
    (custom-top-level-p :initform nil
                        :accessor charmed-port-custom-top-level-p
-                       :documentation "T when charmed-frame-top-level is running. Controls whether Tab cycles focus (custom) or passes through to DREI completion (default-frame-top-level)."))
+                       :documentation "T when charmed-frame-top-level is running. Controls whether Tab cycles focus (custom) or passes through to DREI completion (default-frame-top-level).")
+   (resize-pending :initform nil
+                   :accessor charmed-port-resize-pending
+                   :documentation "Set to (width . height) by the I/O thread when a terminal resize is detected. The main thread reads and clears it during redisplay."))
 
   (:default-initargs :pointer (make-instance 'standard-pointer)))
 
@@ -54,7 +57,14 @@
   ;; Create graft and frame manager
   (make-graft port)
   (push (make-instance 'charmed-frame-manager :port port)
-        (port-frame-managers port)))
+        (port-frame-managers port))
+  ;; Start the I/O thread — this is the standard McCLIM mechanism used by
+  ;; CLX, SDL2, etc.  The thread loops calling process-next-event which
+  ;; reads terminal input, translates to McCLIM events, and distributes
+  ;; them to sheet event queues via distribute-event → dispatch-event →
+  ;; queue-append.  concurrent-queue's condition variables get signaled,
+  ;; waking the main thread's blocking queue-read calls.
+  (restart-port port))
 
 (defmethod destroy-port :before ((port charmed-port))
   (when (charmed-port-raw-mode-p port)
@@ -85,21 +95,36 @@
   (declare (ignore sheet))
   (bounding-rectangle* region))
 
-;;; Unified terminal resize handler.
-;;; Called from both the initial resize check and the polling loop.
-(defun %handle-terminal-resize (port)
-  "Handle terminal resize: resize screen, relayout all frames, redisplay.
-   Returns T if resize was handled, NIL otherwise."
+;;; Terminal resize handling — split between I/O thread and main thread.
+;;;
+;;; The I/O thread detects the resize signal and resizes the screen buffer
+;;; (cheap, no screen writes).  It stores the new size in resize-pending.
+;;; The main thread applies the resize: relayout, redisplay, flush.
+
+(defun %detect-terminal-resize (port)
+  "I/O thread: detect terminal resize, resize screen buffer, set pending flag.
+   Returns T if resize was detected, NIL otherwise."
   (let ((resize-key (charmed:poll-resize)))
     (when resize-key
       (let* ((size (charmed:terminal-size))
              (width (first size))
              (height (second size))
              (screen (charmed-port-screen port)))
-        ;; Resize the charmed screen buffer
+        ;; Resize the charmed screen buffer (no screen output)
         (when screen
           (charmed:screen-resize screen width height))
-        ;; Relayout all frames at the new terminal size
+        ;; Store pending resize for the main thread
+        (setf (charmed-port-resize-pending port) (cons width height)))
+      t)))
+
+(defun %apply-pending-resize (port)
+  "Main thread: if a resize is pending, relayout all frames and redisplay.
+   Returns T if resize was applied, NIL otherwise."
+  (let ((pending (charmed-port-resize-pending port)))
+    (when pending
+      (setf (charmed-port-resize-pending port) nil)
+      (let ((width (car pending))
+            (height (cdr pending)))
         (let ((fm (first (port-frame-managers port))))
           (when fm
             (dolist (frame (frame-manager-frames fm))
@@ -119,11 +144,16 @@
 
 ;;; Event processing - polls charmed for terminal input
 (defmethod process-next-event ((port charmed-port) &key wait-function (timeout nil))
+  ;; This method runs on the port's I/O thread (via port-io-loop / restart-port).
+  ;; It must NOT perform screen writes — only read terminal input, translate to
+  ;; McCLIM events, and distribute them to sheet event queues.  Screen updates
+  ;; happen on the main thread during redisplay-frame-panes / port-force-output.
+  ;;
   ;; Check wait-function first
   (when (maybe-funcall wait-function)
     (return-from process-next-event (values nil :wait-function)))
-  ;; Check for resize at start of event processing
-  (when (%handle-terminal-resize port)
+  ;; Check for resize at start of event processing (I/O thread safe)
+  (when (%detect-terminal-resize port)
     (return-from process-next-event t))
   ;; Read terminal input with timeout.
   ;; When timeout is nil, block until an event arrives (loop internally).
@@ -137,25 +167,7 @@
         (charmed-key
          (let ((event (translate-charmed-event port charmed-key)))
            (when event
-             (distribute-event port event)
-             ;; Flush screen after event distribution, but NOT during command
-             ;; reading for regular character keys — DREI will echo the
-             ;; character and present via display-drei :after.  Flushing
-             ;; here during command reading presents the screen BEFORE the
-             ;; character has been echoed, causing a one-behind artifact.
-             ;; Activation gestures (Enter, Tab) and non-character keys
-             ;; still flush, since they trigger command execution or
-             ;; completion which needs immediate screen update.
-             (let* ((skip-flush-p
-                      (and (typep event 'key-press-event)
-                           (let ((ch (keyboard-event-character event)))
-                             (and ch (graphic-char-p ch)))
-                           (let ((fm-0 (first (port-frame-managers port))))
-                             (and fm-0
-                                  (let ((fr (first (frame-manager-frames fm-0))))
-                                    (and fr (frame-reading-command-p fr))))))))
-               (unless skip-flush-p
-                 (port-force-output port))))
+             (distribute-event port event))
            (return (if event t (values nil :timeout)))))
         ((maybe-funcall wait-function)
          (return (values nil :wait-function)))
@@ -165,7 +177,7 @@
         (t
          ;; No timeout specified and no event yet — keep polling.
          ;; Also check for resize while waiting.
-         (when (%handle-terminal-resize port)
+         (when (%detect-terminal-resize port)
            (return t)))))))  ;; cond/let*/loop
 
 ;;; Translate a charmed key-event into a McCLIM event

@@ -30,8 +30,9 @@
     (is (equal '(40 . 10) (gethash pane2 sizes)))))
 
 (test resize-handler-exists
-  "The unified resize handler should be defined"
-  (is (fboundp 'clim-charmed::%handle-terminal-resize)))
+  "The resize detection and application handlers should be defined"
+  (is (fboundp 'clim-charmed::%detect-terminal-resize))
+  (is (fboundp 'clim-charmed::%apply-pending-resize)))
 
 (test charmed-port-class-exists
   "The charmed-port class should be defined"
