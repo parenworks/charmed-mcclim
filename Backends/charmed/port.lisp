@@ -414,12 +414,15 @@ first frame's top-level-sheet, or the graft."
           (if (typep sheet 'standard-output-recording-stream)
               ;; For output-recording streams, replay records directly
               ;; with :draw t so text reaches the medium.
-              ;; Replay ALL records, not just those within sheet-region.
-              ;; Content that overflows the viewport is handled by scrolling:
-              ;; sheet-to-screen applies the scroll offset and buffer-set-cell
-              ;; discards draws outside the screen buffer bounds.
+              ;; Compute a visible band in pane coordinates based on the
+              ;; scroll offset and viewport height, so we only replay
+              ;; records that will actually be visible on screen.
               (with-output-recording-options (sheet :record nil :draw t)
-                (stream-replay sheet +everywhere+))
+                (let* ((scroll-y (pane-scroll-offset port sheet))
+                       (vp (gethash sheet (charmed-port-viewport-sizes port)))
+                       (vh (if vp (round (fourth vp)) 50)))
+                  (stream-replay sheet
+                                 (make-rectangle* 0 scroll-y 99999 (+ scroll-y vh)))))
               ;; For non-recording sheets, just call handle-repaint
               (handle-repaint sheet region)))
         (call-next-method))))

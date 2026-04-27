@@ -9,11 +9,24 @@ run on charmed (terminal), CLX (X11), etc.
 ## What Works ✅
 
 - **test-hello `run-standard`** — displays, Ctrl-Q exits cleanly, terminal
-  restored. Proven working.
+  restored.
+- **test-hsplit `run-standard`** — two side-by-side panes, scrolling with
+  Up/Down, Tab focus cycling, Ctrl-Q exit. All working.
 - **Ctrl-Q quit** — handled via `charmed-global-command-table` keystroke
   accelerator `(#\q :control)` → `com-charmed-quit` → `frame-exit`. Works on
   main thread through standard `read-command-using-keystrokes` →
   `accelerator-gesture` signaling.
+- **Arrow key scrolling** — Up/Down work as keystroke accelerators via
+  `charmed-navigation-command-table`. Scroll offset managed per-pane with
+  `:manual`/`:auto` mode tracking.
+- **Tab focus cycling** — works as keystroke accelerator in standard mode.
+  Events routed to `frame-standard-input` so commands work after focus change.
+- **Visible-band replay** — `dispatch-repaint :around` computes a scroll-aware
+  visible region and only replays output records within view (performance fix).
+- **Auto-scroll disabled in standard mode** — panes start at offset 0; user
+  scrolls manually. Auto-scroll only active in custom charmed top-level.
+- **Border color fix** — hrack separators check both adjacent children
+  (matching vrack behavior); divider visible in cyan regardless of focus side.
 - **Terminal cleanup** — `(unwind-protect (run-frame-top-level frame)
   (destroy-port port))` in `run-standard` restores terminal on exit.
 - **Key character recovery** — `translate-charmed-event` in `port.lisp`
@@ -22,60 +35,15 @@ run on charmed (terminal), CLX (X11), etc.
 - **Keystroke inheritance** — `adopt-frame :before` injects
   `charmed-global-command-table` and sets `inherit-menu` to `:keystrokes`.
 
-## What Doesn't Work Yet ❌
+## Remaining Work ❌
 
-### Arrow key scroll not working in test-hsplit `run-standard`
-
-Tab (focus cycling) and Ctrl-Q (quit) work as keystroke accelerators, but
-Up/Down arrow keys do NOT trigger scroll commands.
-
-**Current architecture:**
-
-- `charmed-global-command-table` — only Ctrl-Q quit (always inherited)
-- `charmed-navigation-command-table` — scroll (Up/Down/PgUp/PgDn) + focus
-  (Tab), inherited only for non-interactor frames via `adopt-frame :after`
-  (to avoid conflicting with DREI in interactor apps)
-
-**Investigation status:**
-
-The event dispatch path was traced through McCLIM core:
-
-1. I/O thread creates `key-press-event` with `key-name :up`, `key-character nil`
-2. `distribute-event :around` → `charmed-intercept-key-event`:
-   - Checks `frame-reading-command-p` — returns **nil** when frame is reading
-     a command (i.e. always during `default-frame-top-level`)
-   - So event passes through (NOT intercepted)
-3. Event dispatched to focused sheet via `(dispatch-event focused event)`
-4. `standard-sheet-input-mixin` queues event in sheet event queue
-5. Main thread in `stream-input-wait` reads event, calls `handle-event`:
-   - **Primary** (`standard-sheet-input-mixin`): RE-QUEUES event to sheet queue!
-   - **:after** (`standard-extended-input-stream`): appends to input buffer
-6. `stream-read-gesture` reads from input buffer → `stream-process-gesture`
-7. `accelerator-gesture-p` should match `:up` → signal `accelerator-gesture`
-8. Handler in `read-command-using-keystrokes` should catch → return scroll cmd
-
-**Possible issues to investigate:**
-
-- **Re-queuing loop**: `handle-event` primary method on
-  `standard-sheet-input-mixin` re-queues the event to the sheet event queue
-  after it's been read from that same queue. This could cause each event to be
-  processed infinitely. Need to verify this doesn't prevent accelerator from
-  firing. Tab works though, so the mechanism IS functional for some keys.
-- **Tab works but Up doesn't**: Since Tab DOES work as an accelerator but Up
-  does NOT, the issue might be in gesture matching or in how the up-arrow event
-  is created/matched. Check `event-matches-gesture-name-p` with actual event
-  data.
-- **`charmed-intercept-key-event` still handles `:up`**: Even though
-  `frame-reading-command-p` returns nil (passing event through), the intercept
-  function still has `((eql key-name :up) ...)` branches. If
-  `frame-reading-command-p` is sometimes false between main-thread
-  iterations, the I/O thread intercept could steal the event before it reaches
-  the stream.
-- **`distribute-event :around` Ctrl-Q intercept**: There is STILL a direct
-  `frame-exit` call for Ctrl-Q in `distribute-event :around` on the I/O
-  thread (port.lisp). This should be removed — it works by accident because
-  `signal` for non-error conditions returns nil when no handler is found on
-  the I/O thread. The keystroke accelerator path is the correct one.
+- **test-multi-pane `run-standard`** — not yet tested
+- **test-interactor `run-standard`** — not yet tested
+- **Scrolling performance** — slightly sluggish with 100+ lines of content;
+  visible-band replay helps but could be optimized further
+- **Clean up `debug-hello.lisp`** — debug script, can be deleted
+- **Remove I/O thread debug logging** — `charmed-debug-log` calls in
+  `distribute-event :around` and `charmed-intercept-key-event`
 
 **Key code locations:**
 
@@ -142,15 +110,6 @@ cd ~/SourceCode/charmed-mcclim && sbcl --eval '(ql:quickload :mcclim :silent t)'
 
 ## Next Steps
 
-1. **Debug why Up/Down don't fire as accelerators** — Tab works so the
-   mechanism is functional. Add logging to `stream-read-gesture` or
-   `accelerator-gesture-p` to see if the event reaches the accelerator check
-   and whether it matches.
-2. **Check if `distribute-event :around` steals arrow events** — the I/O
-   thread's `charmed-intercept-key-event` might sometimes intercept arrows
-   before they reach the main thread (when `frame-reading-command-p` is false
-   between iterations).
-3. **Remove I/O thread `frame-exit` call for Ctrl-Q** in `distribute-event
-   :around` — it's redundant now that the accelerator path works.
-4. **Test multi-pane and interactor apps** once scroll is fixed.
-5. **Clean up `debug-hello.lisp`** — no longer needed.
+1. **Test multi-pane and interactor apps** with `run-standard`.
+2. **Clean up debug artifacts** — remove `debug-hello.lisp` and debug logging.
+3. **Performance investigation** — profile scrolling with large content.

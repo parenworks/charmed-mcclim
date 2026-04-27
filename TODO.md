@@ -29,7 +29,12 @@
 - [x] Suppress menu bar and pointer-documentation pane — `adopt-frame :before` removes unsupported frame pane slots
 - [x] Suppress noise-string rendering — `input-editor-format :around` prevents DREI buffer corruption
 - [x] Presentation mouse clicking — `find-pane-at-screen-position` maps terminal coords to pane-local coords with +0.5 cell-center offset; `make-charmed-pointer-event` sets `pointer-event` sheet-x/sheet-y slots; `distribute-event :around` routes pointer events to focused pane for `stream-read-gesture` pickup; click-to-focus on stream panes (`test-presentations.lisp`)
-- [x] Auto-scroll — `redisplay-frame-panes :after` scrolls panes to bottom when content exceeds viewport
+- [x] Auto-scroll — `redisplay-frame-panes :after` scrolls panes to bottom when content exceeds viewport (custom top-level only)
+- [x] Standard CLIM startup — apps using `default-frame-top-level` run unchanged on the charmed backend; no `:top-level` override needed
+- [x] Scroll commands as keystroke accelerators — Up/Down/Tab work as accelerator gestures via command tables in standard mode
+- [x] Event routing for standard top-level — key events dispatched to `frame-standard-input` so commands work after Tab focus cycling
+- [x] Visible-band replay — `dispatch-repaint :around` computes scroll-aware visible region, only replays output records in view
+- [x] Border color consistency — hrack separators check both adjacent children (matching vrack behavior)
 
 ## Pending
 
@@ -63,3 +68,4 @@
 - Simple McCLIM demo apps render in terminal ✅ (`test-hello.lisp`, `test-multi-pane.lisp`, `test-interactor.lisp`)
 - McCLIM Listener works ✅ (`test-real-listener.lisp`, `test-listener.lisp`)
 - Presentation clicking works ✅ (`test-presentations.lisp`)
+- Standard CLIM startup works ✅ (`test-hello.lisp`, `test-hsplit.lisp` via `run-standard`)

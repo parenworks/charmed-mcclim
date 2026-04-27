@@ -38,11 +38,12 @@ charmed-mcclim/
 - **McCLIM Listener** — Lisp eval, describe, package commands working
 - **Presentation clicking** — mouse clicks on presented objects invoke translators
 - **Multi-pane layout** — `vertically` and `horizontally` composition with automatic resize
-- **Pane borders** — horizontal (`━`) and vertical (`┃`) separator lines between panes, focused pane highlighted in green
+- **Pane borders** — horizontal (`━`) and vertical (`┃`) separator lines between panes, focused pane highlighted in cyan
 - **Command processing** — `default-frame-top-level`, `accept`/`present`, DREI input editor
 - **Partial command parser** — terminal-friendly argument prompting for keystroke-invoked commands (replaces GUI `accepting-values` dialog)
 - **Per-pane scrolling** — Up/Down/PgUp/PgDn with scroll clamping
-- **Auto-scroll** — new output automatically scrolls panes to bottom
+- **Auto-scroll** — new output automatically scrolls panes to bottom (custom top-level only; standard mode starts at top)
+- **Standard CLIM startup** — apps using `default-frame-top-level` run unchanged; no backend-specific `:top-level` override needed
 - **Focus cycling** — Tab moves between panes with visual indicator
 - **Raw key mode** — `charmed-frame-wants-raw-keys-p` lets frames receive arrow/scroll keys directly for custom navigation
 - **Text styles** — bold, italic, dim, underline mapped to terminal attributes
@@ -67,18 +68,26 @@ The project also includes a standalone CLIM-inspired framework (`src/`) with its
 (push #P"/path/to/charmed-mcclim/Backends/charmed/" asdf:*central-registry*)
 (asdf:load-system :mcclim-charmed)
 
-;; Define your application frame
+;; Define your application frame — no backend-specific code needed
 (clim:define-application-frame my-app ()
   ()
-  (:panes (display :application :display-function 'show-hello))
-  (:layouts (default display))
-  (:top-level (clim-charmed:charmed-frame-top-level)))
+  (:panes (display :application
+                   :display-function 'show-hello
+                   :scroll-bars nil))
+  (:layouts (default display)))
 
 (defun show-hello (frame pane)
   (declare (ignore frame))
   (format pane "Hello from the terminal!~%Press Ctrl-Q to exit."))
 
-;; Run it on the charmed backend
+;; Run with standard CLIM startup
+(let* ((port (find-port :server-path '(:charmed)))
+       (fm (first (climi::frame-managers port)))
+       (frame (make-application-frame 'my-app :frame-manager fm)))
+  (unwind-protect (run-frame-top-level frame)
+    (destroy-port port)))
+
+;; Or use the convenience helper (custom top-level)
 (clim-charmed:run-frame-on-charmed 'my-app)
 ```
 
