@@ -72,11 +72,18 @@
    (default
     (vertically ()
       (3/4 top-pane)
-      (1/4 bottom-pane))))
-  (:top-level (clim-charmed:charmed-frame-top-level)))
+      (1/4 bottom-pane)))))
 
 ;;; No custom key handler needed — scrolling is handled by the event loop.
 ;;; Other keys are ignored.
 
 (defun run ()
   (clim-charmed:run-frame-on-charmed 'multi-pane-test))
+
+(defun run-standard ()
+  "Run using standard CLIM startup."
+  (let* ((port (find-port :server-path '(:charmed)))
+         (fm (first (climi::frame-managers port)))
+         (frame (make-application-frame 'multi-pane-test :frame-manager fm)))
+    (unwind-protect (run-frame-top-level frame)
+      (destroy-port port))))

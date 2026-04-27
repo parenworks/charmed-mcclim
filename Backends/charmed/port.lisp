@@ -292,16 +292,27 @@ first frame's top-level-sheet, or the graft."
               (modifier-state (logior (if ctrl-p +control-key+ 0)
                                       (if alt-p +meta-key+ 0))))
          (setf (charmed-port-modifier-state port) modifier-state)
-         (let ((key-name (translate-key-name code ch))
-               ;; Ensure special keys have the right key-character for
-               ;; McCLIM's activation gesture / input editing checks.
-               (key-char (or ch
-                             (case code
-                               (#.charmed:+key-enter+     #\Newline)
-                               (#.charmed:+key-backspace+ #\Backspace)
-                               (#.charmed:+key-tab+       #\Tab)
-                               (#.charmed:+key-escape+    #\Escape)
-                               (t nil)))))
+         (let* (;; For Ctrl+letter, the terminal sends a control character
+                ;; (ASCII 1-26).  Recover the base letter so McCLIM's
+                ;; gesture matching works — e.g. Ctrl-Q sends DC1 (17),
+                ;; but the accelerator expects (#\q :control).
+                (base-char (when (and ctrl-p ch
+                                      (>= (char-code ch) 1)
+                                      (<= (char-code ch) 26))
+                             (char-downcase (code-char (+ (char-code ch) 64)))))
+                (key-name (if base-char
+                              (intern (string (char-upcase base-char)) :keyword)
+                              (translate-key-name code ch)))
+                ;; Ensure special keys have the right key-character for
+                ;; McCLIM's activation gesture / input editing checks.
+                (key-char (or base-char
+                              ch
+                              (case code
+                                (#.charmed:+key-enter+     #\Newline)
+                                (#.charmed:+key-backspace+ #\Backspace)
+                                (#.charmed:+key-tab+       #\Tab)
+                                (#.charmed:+key-escape+    #\Escape)
+                                (t nil)))))
            (make-instance 'key-press-event
                           :sheet sheet
                           :key-name key-name
@@ -403,10 +414,12 @@ first frame's top-level-sheet, or the graft."
           (if (typep sheet 'standard-output-recording-stream)
               ;; For output-recording streams, replay records directly
               ;; with :draw t so text reaches the medium.
+              ;; Replay ALL records, not just those within sheet-region.
+              ;; Content that overflows the viewport is handled by scrolling:
+              ;; sheet-to-screen applies the scroll offset and buffer-set-cell
+              ;; discards draws outside the screen buffer bounds.
               (with-output-recording-options (sheet :record nil :draw t)
-                (let ((region-1 (region-intersection region (sheet-region sheet))))
-                  (unless (region-equal region-1 +nowhere+)
-                    (stream-replay sheet region-1))))
+                (stream-replay sheet +everywhere+))
               ;; For non-recording sheets, just call handle-repaint
               (handle-repaint sheet region)))
         (call-next-method))))
@@ -454,17 +467,13 @@ first frame's top-level-sheet, or the graft."
 
 (defmethod distribute-event :around ((port charmed-port) event)
   (when (typep event 'key-press-event)
-    ;; Intercept Ctrl-Q globally as a quit signal
-    (when (and (eql (keyboard-event-key-name event) :|Q|)
-               (not (zerop (logand (event-modifier-state event) +control-key+))))
-      (let ((fm (first (port-frame-managers port))))
-        (when fm
-          (let ((frames (frame-manager-frames fm)))
-            (when frames
-              (frame-exit (first frames))
-              (return-from distribute-event)))))
-      (return-from distribute-event))
-    ;; Intercept terminal-specific keys (Ctrl-Tab, PgUp/PgDn)
+    ;; NOTE: Ctrl-Q is NOT intercepted here.  It flows through as a normal
+    ;; key event and is handled as a keystroke accelerator (com-charmed-quit
+    ;; in charmed-global-command-table) on the main thread.  Calling
+    ;; frame-exit from the I/O thread doesn't work because the handler-case
+    ;; in run-frame-top-level only catches on the main thread.
+    ;;
+    ;; Intercept terminal-specific keys (scroll, focus cycling)
     (let ((intercepted (charmed-intercept-key-event port event)))
       (when intercepted
         (return-from distribute-event)))
@@ -480,8 +489,21 @@ first frame's top-level-sheet, or the graft."
               (let ((queue (frame-event-queue frame)))
                 (when queue
                   (queue-append queue event)))
-              ;; Normal mode: dispatch to focused pane for DREI
-              (dispatch-event focused event)))))
+              ;; Normal mode: dispatch to the pane the main thread reads from.
+              ;; In default-frame-top-level, read-frame-command reads from
+              ;; frame-standard-input (frame-query-io), NOT port-keyboard-input-focus.
+              ;; Dispatching to the focused pane after Tab would send events to a
+              ;; pane whose queue the main thread never reads.
+              ;; In charmed-frame-top-level, events go to focused pane as before.
+              (let ((target (if (charmed-port-custom-top-level-p port)
+                                focused
+                                (or (climi::frame-standard-input frame) focused))))
+                (when (member (keyboard-event-key-name event) '(:up :down :tab))
+                  (clim-charmed::charmed-debug-log
+                   "DISPATCH ~S → target=~S focused=~S"
+                   (keyboard-event-key-name event)
+                   target focused))
+                (dispatch-event target event))))))
     (return-from distribute-event))
   ;; For pointer events, bypass the mirror-based sheet traversal.
   ;; Our mouse events already have the correct target pane and
