@@ -80,13 +80,18 @@
       (loop for it in visible
             for row from (1+ cy)
             for idx from 0
-            do (let ((text (if (> (length it) cw) (subseq it 0 cw) it)))
+            do (let* ((selected-p (= idx selected))
+                      (gutter (if selected-p "> " "  "))
+                      (avail (max 0 (- cw 2)))
+                      (text (if (> (length it) avail) (subseq it 0 avail) it)))
                  (medium-fill-rect medium cx row cw 1)
-                 (medium-write-string medium cx row text
-                                      :fg (if (= idx selected)
+                 (medium-write-string medium cx row gutter
+                                      :fg (lookup-color :white))
+                 (medium-write-string medium (+ cx 2) row text
+                                      :fg (if selected-p
                                               (lookup-color :black)
                                               (lookup-color :white))
-                                      :bg (when (= idx selected)
+                                      :bg (when selected-p
                                             (lookup-color :green))))))
     (let ((scr (medium-screen medium))
           (cursor-x (+ cx (length prompt) (popup-pane-cursor-pos p))))
@@ -200,7 +205,9 @@
          (longest (reduce #'max items
                           :key #'length
                           :initial-value (length prompt)))
-         (inner-w (max 20 (min (- sw 4) (+ longest 4))))
+         ;; +6 reserves 2 cols for the selection gutter ("> " / "  ")
+         ;; plus 4 cols of breathing room around the text.
+         (inner-w (max 20 (min (- sw 4) (+ longest 6))))
          (visible (min (length items) (max 1 max-items)))
          (inner-h (+ 1 visible))
          (w (+ inner-w 2))
