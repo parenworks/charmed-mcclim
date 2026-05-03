@@ -242,24 +242,49 @@
 
 (defclass status-pane (pane)
   ((sections :initarg :sections :initform nil :accessor status-pane-sections
-             :documentation "List of (label . value) pairs to display"))
+             :documentation "List of cells to display.  Each cell is
+either a (LABEL . VALUE) pair rendered as \" LABEL: VALUE \", or a
+spacer sentinel (a list whose CAR is :spacer) which consumes leftover
+width so cells before it sit flush left and cells after it sit flush
+right.  Multiple spacers split the leftover width evenly, with any
+remainder going to the first spacer."))
   (:default-initargs :border-p nil :height 1)
   (:documentation "Single-line status bar."))
 
+(defun %status-pane-cell-text (section)
+  "Render SECTION's natural text, or NIL if SECTION is a spacer."
+  (cond
+    ((and (consp section) (eq (car section) :spacer))
+     nil)
+    (t
+     (format nil " ~A: ~A " (car section) (cdr section)))))
+
 (defmethod pane-render ((p status-pane) medium)
-  "Render status bar as a highlighted line."
-  (let ((x (pane-x p))
-        (y (pane-y p))
-        (w (pane-width p))
-        (fg (lookup-color :black))
-        (bg (lookup-color :white))
-        (style (make-style :bold t)))
-    ;; Fill background
+  "Render status bar as a highlighted line.  Honours :spacer cells by
+allocating leftover width to them after the natural-width cells claim
+their share."
+  (let* ((x (pane-x p))
+         (y (pane-y p))
+         (w (pane-width p))
+         (fg (lookup-color :black))
+         (bg (lookup-color :white))
+         (style (make-style :bold t))
+         (sections (status-pane-sections p))
+         (cell-texts (mapcar #'%status-pane-cell-text sections))
+         (natural-width (reduce #'+ cell-texts
+                                :key (lambda (text) (if text (length text) 0))))
+         (spacer-count (count nil cell-texts))
+         (leftover (max 0 (- w natural-width)))
+         (per-spacer (if (plusp spacer-count) (floor leftover spacer-count) 0))
+         (extra (if (plusp spacer-count) (- leftover (* per-spacer spacer-count)) 0)))
     (medium-fill-rect medium x y w 1 :fg fg :bg bg)
-    ;; Write sections
     (let ((col x))
-      (dolist (section (status-pane-sections p))
-        (let ((text (format nil " ~A: ~A " (car section) (cdr section))))
-          (when (<= (+ col (length text)) (+ x w))
-            (medium-write-string medium col y text :fg fg :bg bg :style style)
-            (incf col (length text))))))))
+      (loop for text in cell-texts
+            do (cond
+                 ((null text)
+                  (let ((this-spacer (+ per-spacer (if (plusp extra) 1 0))))
+                    (when (plusp extra) (decf extra))
+                    (incf col this-spacer)))
+                 ((<= (+ col (length text)) (+ x w))
+                  (medium-write-string medium col y text :fg fg :bg bg :style style)
+                  (incf col (length text))))))))
