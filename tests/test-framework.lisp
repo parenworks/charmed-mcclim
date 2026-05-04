@@ -520,6 +520,119 @@
     (check "named pane miss" (null (frame-pane frame :nonexistent)))))
 
 ;;; ============================================================
+;;; Popup Tests
+;;; ============================================================
+
+(defun %popup-press-char (popup ch)
+  (let* ((ck (charmed:make-key-event :char ch))
+         (ev (make-instance 'keyboard-event :key ck)))
+    (pane-handle-event popup ev)))
+
+(defun %popup-press-code (popup code)
+  (let* ((ck (charmed:make-key-event :code code))
+         (ev (make-instance 'keyboard-event :key ck)))
+    (pane-handle-event popup ev)))
+
+(defun %popup-press-ctrl (popup ch)
+  (let* ((ck (charmed:make-key-event :char ch :ctrl-p t))
+         (ev (make-instance 'keyboard-event :key ck)))
+    (pane-handle-event popup ev)))
+
+(defun test-popup ()
+  (format t "~%=== Popup Tests ===~%")
+
+  ;; Initial state: matches mirror items, state is :open.
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("alpha" "alphabet" "beta" "gamma"))))
+    (check-equal "popup initial matches"
+                 (popup-pane-matches p)
+                 '("alpha" "alphabet" "beta" "gamma"))
+    (check-equal "popup initial state"
+                 (popup-pane-state p) :open))
+
+  ;; Resolution: typing a unique prefix and pressing RET resolves to the
+  ;; matching candidate.
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("alpha" "alphabet" "beta" "gamma"))))
+    (%popup-press-char p #\b)
+    (check-equal "popup matches after b" (popup-pane-matches p) '("beta"))
+    (%popup-press-code p charmed::+key-enter+)
+    (check-equal "popup state resolved" (popup-pane-state p) :resolved)
+    (check-equal "popup resolved input" (popup-pane-input p) "beta"))
+
+  ;; Tab cycles through multiple matches, RET takes the highlighted one.
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("alpha" "alphabet" "beta"))))
+    (%popup-press-char p #\a)
+    (check-equal "popup matches a" (popup-pane-matches p) '("alpha" "alphabet"))
+    (check-equal "popup selected before tab" (popup-pane-selected p) 0)
+    (%popup-press-code p charmed::+key-tab+)
+    (check-equal "popup selected after tab" (popup-pane-selected p) 1)
+    (%popup-press-code p charmed::+key-enter+)
+    (check-equal "popup tab resolution"
+                 (popup-pane-input p) "alphabet"))
+
+  ;; C-g cancels.
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("alpha" "beta"))))
+    (%popup-press-char p #\a)
+    (%popup-press-ctrl p #\g)
+    (check-equal "popup C-g cancels"
+                 (popup-pane-state p) :cancelled))
+
+  ;; Escape cancels.
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("alpha" "beta"))))
+    (%popup-press-char p #\a)
+    (%popup-press-code p charmed::+key-escape+)
+    (check-equal "popup escape cancels"
+                 (popup-pane-state p) :cancelled))
+
+  ;; RET on empty input cancels rather than picking the head.
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("alpha" "beta"))))
+    (%popup-press-code p charmed::+key-enter+)
+    (check-equal "popup empty RET cancels"
+                 (popup-pane-state p) :cancelled))
+
+  ;; No-match RET keeps the popup open (operator may edit).
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("alpha" "beta"))))
+    (%popup-press-char p #\z)
+    (check "popup no-match has empty matches"
+           (null (popup-pane-matches p)))
+    (%popup-press-code p charmed::+key-enter+)
+    (check-equal "popup no-match RET stays open"
+                 (popup-pane-state p) :open))
+
+  ;; Backspace shrinks input and refreshes matches.
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("alpha" "alphabet" "beta"))))
+    (%popup-press-char p #\a)
+    (%popup-press-char p #\l)
+    (check-equal "popup input al" (popup-pane-input p) "al")
+    (%popup-press-code p charmed::+key-backspace+)
+    (check-equal "popup input after backspace" (popup-pane-input p) "a")
+    (check-equal "popup matches refreshed"
+                 (popup-pane-matches p) '("alpha" "alphabet")))
+
+  ;; Case sensitivity defaults to insensitive.
+  (let ((p (make-instance 'popup-pane :x 1 :y 1 :width 40 :height 8
+                                      :prompt "> "
+                                      :items '("Alpha" "Beta"))))
+    (%popup-press-char p #\a)
+    (check-equal "popup case-insensitive match"
+                 (popup-pane-matches p) '("Alpha"))))
+
+;;; ============================================================
 ;;; Run All
 ;;; ============================================================
 
@@ -533,4 +646,5 @@
   (test-focus)
   (test-forms)
   (test-frame)
+  (test-popup)
   (report))

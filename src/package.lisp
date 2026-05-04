@@ -243,6 +243,16 @@
    #:accepting-values-result
    #:presentation-type-to-field-type
 
+   ;; Transient popup
+   #:popup-pane
+   #:popup-pane-prompt
+   #:popup-pane-input
+   #:popup-pane-items
+   #:popup-pane-matches
+   #:popup-pane-selected
+   #:popup-pane-state
+   #:popup-read-completion
+
    ;; Frame definition
    #:application-frame
    #:frame-title

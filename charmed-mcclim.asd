@@ -21,4 +21,5 @@
                  (:file "forms")
                  (:file "clim-proto")
                  (:file "render")
-                 (:file "backend")))))
+                 (:file "backend")
+                 (:file "popup")))))
