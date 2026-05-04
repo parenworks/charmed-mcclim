@@ -295,8 +295,7 @@
                           (error () nil))))
          (bold-p nil)
          (italic-p nil)
-         (dim-p nil)
-         (underline-p nil))
+         (dim-p nil))
     ;; Map face
     (case face
       (:bold (setf bold-p t))
@@ -307,12 +306,11 @@
       ((:tiny :very-small :small) (setf dim-p t))
       ((:large :very-large :huge) (setf bold-p t)))
     ;; Build style if any attributes are set
-    (if (or fg bold-p italic-p dim-p underline-p)
+    (if (or fg bold-p italic-p dim-p)
         (charmed:make-style :fg fg
                             :bold bold-p
                             :italic italic-p
-                            :dim dim-p
-                            :underline underline-p)
+                            :dim dim-p)
         nil)))
 
 ;;; Drawing operations
@@ -338,9 +336,9 @@
            (len (length text))
            (style (text-style-to-charmed-style medium)))
       (with-clipping (medium col row :width len)
-        (let ((clipped-text (if (< len (length text))
-                                (subseq text 0 len)
-                                text)))
+        (let ((clipped-text (if (= len (length text))
+                                text
+                                (subseq text 0 len))))
           (if style
               (charmed:screen-write-string screen col row clipped-text
                                            :style style)

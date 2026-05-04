@@ -40,7 +40,8 @@
 
 (test charmed-port-slots-defined
   "The charmed-port class should have the expected slots"
-  (let ((class (find-class 'clim-charmed::charmed-port)))
+  (let ((_ (find-class 'clim-charmed::charmed-port)))
+    (declare (ignore _))
     ;; Check that the slot accessors are defined
     (is (fboundp 'clim-charmed::charmed-port-scroll-offsets))
     (is (fboundp 'clim-charmed::charmed-port-scroll-modes))
