@@ -10,16 +10,119 @@
 
 (in-package #:clim-charmed)
 
+;;; Temporary debug logging — remove when arrow key issue is resolved
+(defvar *charmed-debug-stream* nil)
+(defun charmed-debug-log (fmt &rest args)
+  (unless *charmed-debug-stream*
+    (setf *charmed-debug-stream*
+          (open "/tmp/charmed-debug.log" :direction :output
+                :if-exists :append :if-does-not-exist :create)))
+  (apply #'format *charmed-debug-stream* (concatenate 'string "~&" fmt "~%") args)
+  (finish-output *charmed-debug-stream*))
 
 (defclass charmed-frame-manager (standard-frame-manager)
   ())
 
+;;;============================================================================
+;;; CHARMED GLOBAL COMMAND TABLE
+;;;============================================================================
+;;; Terminal-equivalent of scroll bars and focus cycling.  These commands
+;;; are auto-inherited by every frame adopted by charmed-frame-manager,
+;;; so applications don't need to define them.  In default-frame-top-level
+;;; they fire as keystroke accelerators via read-command-using-keystrokes.
+;;; In charmed-frame-top-level they are intercepted in distribute-event.
+
+;;; Two command tables: quit is always safe; navigation (scroll/focus)
+;;; conflicts with DREI in interactor apps, so it is only inherited
+;;; for non-interactor frames (see adopt-frame :after below).
+
+(define-command-table charmed-global-command-table)
+
+(define-command (com-charmed-quit
+                 :command-table charmed-global-command-table
+                 :keystroke (#\q :control)
+                 :name nil)
+    ()
+  (frame-exit *application-frame*))
+
+(define-command-table charmed-navigation-command-table)
+
+(define-command (com-charmed-scroll-up
+                 :command-table charmed-navigation-command-table
+                 :keystroke (:up)
+                 :name nil)
+    ()
+  (charmed-debug-log "CMD scroll-up EXECUTING")
+  (let* ((port (port (frame-manager *application-frame*)))
+         (sheet (port-keyboard-input-focus port)))
+    (when sheet
+      (scroll-pane port sheet -1))))
+
+(define-command (com-charmed-scroll-down
+                 :command-table charmed-navigation-command-table
+                 :keystroke (:down)
+                 :name nil)
+    ()
+  (let* ((port (port (frame-manager *application-frame*)))
+         (sheet (port-keyboard-input-focus port)))
+    (when sheet
+      (scroll-pane port sheet 1))))
+
+(define-command (com-charmed-page-up
+                 :command-table charmed-navigation-command-table
+                 :keystroke (:prior)
+                 :name nil)
+    ()
+  (let* ((port (port (frame-manager *application-frame*)))
+         (sheet (port-keyboard-input-focus port)))
+    (when sheet
+      (scroll-pane port sheet (- (pane-height sheet))))))
+
+(define-command (com-charmed-page-down
+                 :command-table charmed-navigation-command-table
+                 :keystroke (:next)
+                 :name nil)
+    ()
+  (let* ((port (port (frame-manager *application-frame*)))
+         (sheet (port-keyboard-input-focus port)))
+    (when sheet
+      (scroll-pane port sheet (pane-height sheet)))))
+
+(define-command (com-charmed-cycle-focus
+                 :command-table charmed-navigation-command-table
+                 :keystroke (:tab)
+                 :name nil)
+    ()
+  (charmed-debug-log "CMD cycle-focus EXECUTING")
+  (let* ((port (port (frame-manager *application-frame*)))
+         (frame *application-frame*))
+    (cycle-focus frame port)))
+
+;;;============================================================================
+;;; ADOPT-FRAME
+;;;============================================================================
+
 ;;; Suppress menu bar and pointer-documentation pane for the terminal.
 ;;; Menu bar gadgets are not usable without mouse and waste screen rows.
-;;; This runs before the standard adopt-frame creates panes.
+;;; Also inject charmed-global-command-table (Ctrl-Q quit) into the
+;;; frame's command table — always safe for all frame types.
+;;; Navigation commands (scroll/focus) are added in adopt-frame :after
+;;; only for non-interactor frames, because Up/Down/Tab accelerators
+;;; conflict with DREI input editing in interactor apps.
 (defmethod adopt-frame :before
     ((fm charmed-frame-manager) (frame application-frame))
-  (suppress-frame-gui-elements frame))
+  (suppress-frame-gui-elements frame)
+  ;; Auto-inherit charmed quit command so Ctrl-Q always works.
+  (let* ((app-table (frame-command-table frame))
+         (current-parents (command-table-inherit-from app-table))
+         (charmed-table (find-command-table 'charmed-global-command-table)))
+    (unless (member charmed-table current-parents)
+      (setf (command-table-inherit-from app-table)
+            (append current-parents (list 'charmed-global-command-table))))
+    ;; Enable keystroke inheritance so accelerators are visible to
+    ;; read-command-using-keystrokes.
+    (when (null (clim-internals::inherit-menu app-table))
+      (setf (slot-value app-table 'clim-internals::inherit-menu) :keystrokes))))
 
 ;;; After the standard adopt-frame creates panes, size the top-level
 ;;; sheet to fill the terminal.
@@ -28,6 +131,17 @@
   (let ((size (charmed:terminal-size))
         (port (port fm))
         (tls (frame-top-level-sheet frame)))
+    ;; For non-interactor frames, inherit navigation commands (scroll,
+    ;; focus cycling) as keystroke accelerators.  These conflict with
+    ;; DREI in interactor apps, so they are only added here.
+    (let* ((has-interactor (climi::find-pane-of-type (frame-panes frame) 'interactor-pane))
+           (app-table (frame-command-table frame))
+           (current-parents (command-table-inherit-from app-table))
+           (nav-table (find-command-table 'charmed-navigation-command-table)))
+      (when (and (not has-interactor)
+                 (not (member nav-table current-parents)))
+        (setf (command-table-inherit-from app-table)
+              (append current-parents (list 'charmed-navigation-command-table)))))
     (when tls
       (move-and-resize-sheet tls 0 0 (first size) (second size))
       (map-over-sheets
@@ -43,13 +157,13 @@
          (when (and (spacing-pane-p sheet)
                     (> (spacing-pane-border-width sheet) 1))
            (setf (spacing-pane-border-width sheet) 1))
-         ;; Set queue-port on every sheet's event queue so that
-         ;; queue-read/queue-listen-or-wait can call process-next-event.
-         ;; Without this, default-frame-top-level's accept/read-gesture
-         ;; would fail because the sheet queue's port is NIL.
+         ;; Wire queue-port on sheet event queues for port-force-output.
+         ;; concurrent-queue inherits queue-port from simple-queue.
+         ;; The I/O thread signals condition variables via queue-append;
+         ;; queue-port is used by do-port-force-output to flush the screen.
          (when (standard-sheet-input-mixin-p sheet)
            (let ((q (sheet-event-queue sheet)))
-             (when (and q (simple-queue-p q) (null (queue-port q)))
+             (when (and q (null (queue-port q)))
                (setf (queue-port q) port)))))
        tls))))
 
@@ -321,18 +435,34 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                       (declare (ignore parent-x))
                       (let* ((parent-row (round parent-y))
                              (parent-h (round (bounding-rectangle-height (sheet-region sheet))))
-                             (row-end (min (+ parent-row parent-h) term-height)))
-                        (dolist (child children)
-                          (multiple-value-bind (sx sy)
-                              (sheet-screen-position-xy child)
-                            (declare (ignore sy))
-                            (let ((col (round sx)))
-                              (when (> col 0)
-                                (let ((fg (if (child-contains-active-p child frame port)
-                                              focus-color inactive-color)))
-                                  (draw-v-line col parent-row row-end fg)))))
-                          ;; Recurse into children for nested splits
-                          (draw-separators child)))))
+                             (row-end (min (+ parent-row parent-h) term-height))
+                             ;; Sort children left-to-right so we can check
+                             ;; both neighbors of each separator.
+                             (child-info
+                              (sort (loop for child in children
+                                          collect (cons child
+                                                        (child-contains-active-p child frame port)))
+                                    #'<
+                                    :key (lambda (ci)
+                                           (multiple-value-bind (sx sy)
+                                               (sheet-screen-position-xy (car ci))
+                                             (declare (ignore sy))
+                                             (round sx))))))
+                        (loop for prev-entry = nil then entry
+                              for entry in child-info
+                              for child = (car entry)
+                              for active = (cdr entry)
+                              for prev-active = (and prev-entry (cdr prev-entry))
+                              do (multiple-value-bind (sx sy)
+                                     (sheet-screen-position-xy child)
+                                   (declare (ignore sy))
+                                   (let ((col (round sx)))
+                                     (when (> col 0)
+                                       (let ((fg (if (or active prev-active)
+                                                     focus-color inactive-color)))
+                                         (draw-v-line col parent-row row-end fg)))))
+                                 ;; Recurse into children for nested splits
+                                 (draw-separators child)))))
                    ;; Other composite — just recurse
                    (t
                     (dolist (child children)
@@ -376,14 +506,12 @@ accumulating sheet-transformation offsets.  Stops at grafts."
       (unless (= current new-offset)
         (setf (pane-scroll-offset port pane) new-offset)
         (setf (pane-needs-redisplay pane) t)
-        ;; Update scroll mode based on direction and position
-        (cond
-          ;; Scrolling up (negative delta) → manual mode
-          ((< delta 0)
-           (setf (pane-scroll-mode port pane) :manual))
-          ;; Reached bottom → back to auto mode
-          ((>= new-offset max-scroll)
-           (setf (pane-scroll-mode port pane) :auto)))))))
+        ;; Any user-initiated scroll switches to :manual mode so
+        ;; redisplay-frame-panes :after won't override the position.
+        ;; Reaching max-scroll switches back to :auto.
+        (if (>= new-offset max-scroll)
+            (setf (pane-scroll-mode port pane) :auto)
+            (setf (pane-scroll-mode port pane) :manual))))))
 
 ;;; Compute pane viewport height for page scroll.
 ;;; Uses captured viewport geometry so it reflects layout allocation, not content size.
@@ -502,61 +630,71 @@ accumulating sheet-transformation offsets.  Stops at grafts."
 (defun charmed-intercept-key-event (port event)
   "Handle charmed-specific key events.  Returns T if the event was consumed.
    When the frame is reading a command (inside accept/read-gesture),
-   let Tab and arrow keys pass through to the input editor."
+   let Tab and arrow keys pass through to the input editor.
+   
+   NOTE: This runs on the I/O thread.  It must NOT perform screen writes.
+   It only modifies state (scroll offsets, focus); the main thread will
+   redisplay on its next cycle."
   (let ((key-name (keyboard-event-key-name event))
         (sheet (port-keyboard-input-focus port)))
+    ;; Log arrow key events for debugging
+    (when (member key-name '(:up :down :tab))
+      (charmed-debug-log "INTERCEPT key=~S sheet=~S custom-tl=~S reading-cmd=~S"
+                         key-name sheet
+                         (charmed-port-custom-top-level-p port)
+                         (when sheet
+                           (let ((f (pane-frame sheet)))
+                             (when f (frame-reading-command-p f))))))
     ;; When the frame is reading a command, don't intercept navigation keys —
     ;; they need to reach the interactor's input buffer.
     (when sheet
       (let ((frame (pane-frame sheet)))
         (when (and frame (frame-reading-command-p frame))
+          (charmed-debug-log "INTERCEPT ~S → pass (reading-command)" key-name)
           (return-from charmed-intercept-key-event nil))
         ;; When the frame wants raw keys (e.g. browse mode), pass through
         (when (and frame (charmed-frame-wants-raw-keys-p frame))
           (return-from charmed-intercept-key-event nil))))
-    (flet ((redisplay-and-present ()
-             (when sheet
-               (let ((frame (pane-frame sheet)))
-                 (when frame
-                   (pre-clear-dirty-panes frame port)
-                   (redisplay-frame-panes frame)
-                   (port-force-output port))))))
-      (cond
-        ;; Tab cycles focus (only in charmed-frame-top-level;
-        ;; in default-frame-top-level, Tab passes through to DREI completion)
-        ((and (eql key-name :tab)
-              (charmed-port-custom-top-level-p port))
-         (when sheet
-           (let ((frame (pane-frame sheet)))
-             (when frame
-               (cycle-focus frame port)
-               (redisplay-and-present))))
-         t)
-        ;; Up/Down scroll by 1 line
-        ((eql key-name :up)
-         (when sheet (scroll-pane port sheet -1) (redisplay-and-present))
-         t)
-        ((eql key-name :down)
-         (when sheet (scroll-pane port sheet 1) (redisplay-and-present))
-         t)
-        ;; PgUp/PgDn scroll by page
-        ((eql key-name :prior)
-         (when sheet (scroll-pane port sheet (- (pane-height sheet))) (redisplay-and-present))
-         t)
-        ((eql key-name :next)
-         (when sheet (scroll-pane port sheet (pane-height sheet)) (redisplay-and-present))
-         t)
-        ;; Everything else passes through
-        (t nil)))))
+    ;; When using default-frame-top-level (standard CLIM startup), all
+    ;; navigation keys should pass through to the keystroke accelerator
+    ;; path on the main thread.  Only intercept here when using the
+    ;; custom charmed-frame-top-level.
+    (unless (charmed-port-custom-top-level-p port)
+      (charmed-debug-log "INTERCEPT ~S → pass (not custom-tl)" key-name)
+      (return-from charmed-intercept-key-event nil))
+    (cond
+      ;; Tab cycles focus
+      ((eql key-name :tab)
+       (when sheet
+         (let ((frame (pane-frame sheet)))
+           (when frame
+             (cycle-focus frame port))))
+       t)
+      ;; Up/Down scroll by 1 line
+      ((eql key-name :up)
+       (when sheet (scroll-pane port sheet -1))
+       t)
+      ((eql key-name :down)
+       (when sheet (scroll-pane port sheet 1))
+       t)
+      ;; PgUp/PgDn scroll by page
+      ((eql key-name :prior)
+       (when sheet (scroll-pane port sheet (- (pane-height sheet))))
+       t)
+      ((eql key-name :next)
+       (when sheet (scroll-pane port sheet (pane-height sheet)))
+       t)
+      ;; Everything else passes through
+      (t nil))))
 
 (defun charmed-frame-top-level (frame &key &allow-other-keys)
   "Top-level loop for frames on the charmed terminal backend.
-   Events flow through McCLIM's standard distribution:
-   process-next-event → distribute-event → dispatch-event → queue.
-   Terminal-specific keys (Ctrl-Q, Ctrl-Tab, PgUp/PgDn) are intercepted
-   in distribute-event :around before reaching the queue.
-   Remaining events are read from the queue and dispatched to the frame
-   via charmed-handle-key-event."
+   The port's I/O thread reads terminal input and distributes events to
+   sheet event queues.  Terminal-specific keys (scroll, Tab focus) are
+   intercepted in distribute-event :around before reaching queues.
+   Ctrl-Q is handled here on the main thread (frame-exit must run on
+   the main thread to be caught by run-frame-top-level's handler-case).
+   This loop reads queued events and dispatches them to the frame."
   (let* ((fm (frame-manager frame))
          (port (port fm)))
     ;; Signal that the custom top-level is active — Tab cycles focus
@@ -569,28 +707,34 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     ;; Initial display (pre-clear and viewport capture happen in :before method)
     (redisplay-frame-panes frame :force-p t)
     (port-force-output port)
-    ;; Event loop — pump events through McCLIM's standard distribution,
-    ;; then drain whatever reached each pane's event queue.
+    ;; Event loop — read events from the frame's event queue (populated by
+    ;; the I/O thread) and dispatch them.  Use read-no-hang + sleep to avoid
+    ;; blocking forever, allowing periodic redisplay for scroll/focus changes
+    ;; that the I/O thread applied without triggering screen writes.
     (loop
-      ;; Pump terminal input through process-next-event → distribute-event.
-      ;; Terminal-specific keys are consumed in distribute-event :around;
-      ;; everything else lands in the focused pane's event queue.
-      (process-next-event port :timeout 0.05)
-      ;; Drain queued events from all panes, but only when NOT reading a command.
-      ;; During accept/read-gesture, events must stay in the queue for DREI to read.
-      (unless (frame-reading-command-p frame)
-        (dolist (pane (collect-frame-panes frame))
-          (loop for event = (event-read-no-hang pane)
+        ;; Drain queued events, but only when NOT reading a command.
+        ;; During accept/read-gesture, events must stay in the queue for DREI.
+        (unless (frame-reading-command-p frame)
+          (loop for event = (event-read-no-hang (first (collect-frame-panes frame)))
                 while event
                 do (cond
+                     ;; Ctrl-Q: quit (runs on main thread, so frame-exit works)
+                     ((and (typep event 'key-press-event)
+                           (eql (keyboard-event-key-name event) :|Q|)
+                           (not (zerop (logand (event-modifier-state event)
+                                               +control-key+))))
+                      (frame-exit frame))
                      ((typep event 'key-press-event)
                       (charmed-handle-key-event frame event
                                                 (port-keyboard-input-focus port)))
                      (t
-                      (handle-event (event-sheet event) event))))))
-      ;; Redisplay (pre-clear and viewport capture happen in :before method)
-      (redisplay-frame-panes frame)
-      (port-force-output port))))
+                      (handle-event (event-sheet event) event)))))
+        ;; Redisplay (pre-clear and viewport capture happen in :before method)
+        (redisplay-frame-panes frame)
+        (port-force-output port)
+        ;; Brief sleep to avoid busy-waiting — the I/O thread pushes events
+        ;; at terminal input rate.
+        (sleep 0.02))))
 
 ;;; Hook into redisplay to capture viewport sizes and pre-clear dirty panes.
 ;;; This ensures correct behavior regardless of which top-level loop is used
@@ -602,6 +746,8 @@ accumulating sheet-transformation offsets.  Stops at grafts."
       (let* ((fm (frame-manager frame))
              (port (when fm (port fm))))
         (when (and port (typep port 'charmed-port))
+          ;; Apply any pending resize from the I/O thread
+          (%apply-pending-resize port)
           (capture-pane-viewport-sizes frame port)
           (pre-clear-dirty-panes frame port)))
     (error () nil)))
@@ -614,18 +760,21 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     (when (and port (typep port 'charmed-port))
       ;; Auto-scroll: for panes in :auto mode whose content exceeds the
       ;; viewport, scroll to show the bottom (latest output).
-      ;; Panes in :manual mode preserve user scroll position.
-      (dolist (pane (collect-frame-panes frame))
-        (handler-case
-            (when (eq (pane-scroll-mode port pane) :auto)
-              (let ((content-h (pane-content-height pane))
-                    (vh (pane-height pane)))
-                (when (> content-h vh)
-                  (let ((max-scroll (- content-h vh))
-                        (current (pane-scroll-offset port pane)))
-                    (when (< current max-scroll)
-                      (setf (pane-scroll-offset port pane) max-scroll))))))
-          (error () nil)))
+      ;; Only active for the custom charmed top-level (streaming output).
+      ;; In standard CLIM mode (default-frame-top-level), display functions
+      ;; produce static content — start at offset 0 and let users scroll.
+      (when (charmed-port-custom-top-level-p port)
+        (dolist (pane (collect-frame-panes frame))
+          (handler-case
+              (when (eq (pane-scroll-mode port pane) :auto)
+                (let ((content-h (pane-content-height pane))
+                      (vh (pane-height pane)))
+                  (when (> content-h vh)
+                    (let ((max-scroll (- content-h vh))
+                          (current (pane-scroll-offset port pane)))
+                      (when (< current max-scroll)
+                        (setf (pane-scroll-offset port pane) max-scroll))))))
+            (error () nil))))
       (port-force-output port))))
 
 

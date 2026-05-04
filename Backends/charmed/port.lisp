@@ -30,7 +30,10 @@
                   :documentation "Per-pane (col . row) of the end of the last drawn text, for cursor tracking during input editing.")
    (custom-top-level-p :initform nil
                        :accessor charmed-port-custom-top-level-p
-                       :documentation "T when charmed-frame-top-level is running. Controls whether Tab cycles focus (custom) or passes through to DREI completion (default-frame-top-level)."))
+                       :documentation "T when charmed-frame-top-level is running. Controls whether Tab cycles focus (custom) or passes through to DREI completion (default-frame-top-level).")
+   (resize-pending :initform nil
+                   :accessor charmed-port-resize-pending
+                   :documentation "Set to (width . height) by the I/O thread when a terminal resize is detected. The main thread reads and clears it during redisplay."))
 
   (:default-initargs :pointer (make-instance 'standard-pointer)))
 
@@ -54,7 +57,14 @@
   ;; Create graft and frame manager
   (make-graft port)
   (push (make-instance 'charmed-frame-manager :port port)
-        (port-frame-managers port)))
+        (port-frame-managers port))
+  ;; Start the I/O thread — this is the standard McCLIM mechanism used by
+  ;; CLX, SDL2, etc.  The thread loops calling process-next-event which
+  ;; reads terminal input, translates to McCLIM events, and distributes
+  ;; them to sheet event queues via distribute-event → dispatch-event →
+  ;; queue-append.  concurrent-queue's condition variables get signaled,
+  ;; waking the main thread's blocking queue-read calls.
+  (restart-port port))
 
 (defmethod destroy-port :before ((port charmed-port))
   (when (charmed-port-raw-mode-p port)
@@ -85,21 +95,36 @@
   (declare (ignore sheet))
   (bounding-rectangle* region))
 
-;;; Unified terminal resize handler.
-;;; Called from both the initial resize check and the polling loop.
-(defun %handle-terminal-resize (port)
-  "Handle terminal resize: resize screen, relayout all frames, redisplay.
-   Returns T if resize was handled, NIL otherwise."
+;;; Terminal resize handling — split between I/O thread and main thread.
+;;;
+;;; The I/O thread detects the resize signal and resizes the screen buffer
+;;; (cheap, no screen writes).  It stores the new size in resize-pending.
+;;; The main thread applies the resize: relayout, redisplay, flush.
+
+(defun %detect-terminal-resize (port)
+  "I/O thread: detect terminal resize, resize screen buffer, set pending flag.
+   Returns T if resize was detected, NIL otherwise."
   (let ((resize-key (charmed:poll-resize)))
     (when resize-key
       (let* ((size (charmed:terminal-size))
              (width (first size))
              (height (second size))
              (screen (charmed-port-screen port)))
-        ;; Resize the charmed screen buffer
+        ;; Resize the charmed screen buffer (no screen output)
         (when screen
           (charmed:screen-resize screen width height))
-        ;; Relayout all frames at the new terminal size
+        ;; Store pending resize for the main thread
+        (setf (charmed-port-resize-pending port) (cons width height)))
+      t)))
+
+(defun %apply-pending-resize (port)
+  "Main thread: if a resize is pending, relayout all frames and redisplay.
+   Returns T if resize was applied, NIL otherwise."
+  (let ((pending (charmed-port-resize-pending port)))
+    (when pending
+      (setf (charmed-port-resize-pending port) nil)
+      (let ((width (car pending))
+            (height (cdr pending)))
         (let ((fm (first (port-frame-managers port))))
           (when fm
             (dolist (frame (frame-manager-frames fm))
@@ -119,11 +144,16 @@
 
 ;;; Event processing - polls charmed for terminal input
 (defmethod process-next-event ((port charmed-port) &key wait-function (timeout nil))
+  ;; This method runs on the port's I/O thread (via port-io-loop / restart-port).
+  ;; It must NOT perform screen writes — only read terminal input, translate to
+  ;; McCLIM events, and distribute them to sheet event queues.  Screen updates
+  ;; happen on the main thread during redisplay-frame-panes / port-force-output.
+  ;;
   ;; Check wait-function first
   (when (maybe-funcall wait-function)
     (return-from process-next-event (values nil :wait-function)))
-  ;; Check for resize at start of event processing
-  (when (%handle-terminal-resize port)
+  ;; Check for resize at start of event processing (I/O thread safe)
+  (when (%detect-terminal-resize port)
     (return-from process-next-event t))
   ;; Read terminal input with timeout.
   ;; When timeout is nil, block until an event arrives (loop internally).
@@ -137,25 +167,7 @@
         (charmed-key
          (let ((event (translate-charmed-event port charmed-key)))
            (when event
-             (distribute-event port event)
-             ;; Flush screen after event distribution, but NOT during command
-             ;; reading for regular character keys — DREI will echo the
-             ;; character and present via display-drei :after.  Flushing
-             ;; here during command reading presents the screen BEFORE the
-             ;; character has been echoed, causing a one-behind artifact.
-             ;; Activation gestures (Enter, Tab) and non-character keys
-             ;; still flush, since they trigger command execution or
-             ;; completion which needs immediate screen update.
-             (let* ((skip-flush-p
-                      (and (typep event 'key-press-event)
-                           (let ((ch (keyboard-event-character event)))
-                             (and ch (graphic-char-p ch)))
-                           (let ((fm-0 (first (port-frame-managers port))))
-                             (and fm-0
-                                  (let ((fr (first (frame-manager-frames fm-0))))
-                                    (and fr (frame-reading-command-p fr))))))))
-               (unless skip-flush-p
-                 (port-force-output port))))
+             (distribute-event port event))
            (return (if event t (values nil :timeout)))))
         ((maybe-funcall wait-function)
          (return (values nil :wait-function)))
@@ -165,7 +177,7 @@
         (t
          ;; No timeout specified and no event yet — keep polling.
          ;; Also check for resize while waiting.
-         (when (%handle-terminal-resize port)
+         (when (%detect-terminal-resize port)
            (return t)))))))  ;; cond/let*/loop
 
 ;;; Translate a charmed key-event into a McCLIM event
@@ -280,16 +292,27 @@ first frame's top-level-sheet, or the graft."
               (modifier-state (logior (if ctrl-p +control-key+ 0)
                                       (if alt-p +meta-key+ 0))))
          (setf (charmed-port-modifier-state port) modifier-state)
-         (let ((key-name (translate-key-name code ch))
-               ;; Ensure special keys have the right key-character for
-               ;; McCLIM's activation gesture / input editing checks.
-               (key-char (or ch
-                             (case code
-                               (#.charmed:+key-enter+     #\Newline)
-                               (#.charmed:+key-backspace+ #\Backspace)
-                               (#.charmed:+key-tab+       #\Tab)
-                               (#.charmed:+key-escape+    #\Escape)
-                               (t nil)))))
+         (let* (;; For Ctrl+letter, the terminal sends a control character
+                ;; (ASCII 1-26).  Recover the base letter so McCLIM's
+                ;; gesture matching works — e.g. Ctrl-Q sends DC1 (17),
+                ;; but the accelerator expects (#\q :control).
+                (base-char (when (and ctrl-p ch
+                                      (>= (char-code ch) 1)
+                                      (<= (char-code ch) 26))
+                             (char-downcase (code-char (+ (char-code ch) 64)))))
+                (key-name (if base-char
+                              (intern (string (char-upcase base-char)) :keyword)
+                              (translate-key-name code ch)))
+                ;; Ensure special keys have the right key-character for
+                ;; McCLIM's activation gesture / input editing checks.
+                (key-char (or base-char
+                              ch
+                              (case code
+                                (#.charmed:+key-enter+     #\Newline)
+                                (#.charmed:+key-backspace+ #\Backspace)
+                                (#.charmed:+key-tab+       #\Tab)
+                                (#.charmed:+key-escape+    #\Escape)
+                                (t nil)))))
            (make-instance 'key-press-event
                           :sheet sheet
                           :key-name key-name
@@ -391,10 +414,15 @@ first frame's top-level-sheet, or the graft."
           (if (typep sheet 'standard-output-recording-stream)
               ;; For output-recording streams, replay records directly
               ;; with :draw t so text reaches the medium.
+              ;; Compute a visible band in pane coordinates based on the
+              ;; scroll offset and viewport height, so we only replay
+              ;; records that will actually be visible on screen.
               (with-output-recording-options (sheet :record nil :draw t)
-                (let ((region-1 (region-intersection region (sheet-region sheet))))
-                  (unless (region-equal region-1 +nowhere+)
-                    (stream-replay sheet region-1))))
+                (let* ((scroll-y (pane-scroll-offset port sheet))
+                       (vp (gethash sheet (charmed-port-viewport-sizes port)))
+                       (vh (if vp (round (fourth vp)) 50)))
+                  (stream-replay sheet
+                                 (make-rectangle* 0 scroll-y 99999 (+ scroll-y vh)))))
               ;; For non-recording sheets, just call handle-repaint
               (handle-repaint sheet region)))
         (call-next-method))))
@@ -442,17 +470,13 @@ first frame's top-level-sheet, or the graft."
 
 (defmethod distribute-event :around ((port charmed-port) event)
   (when (typep event 'key-press-event)
-    ;; Intercept Ctrl-Q globally as a quit signal
-    (when (and (eql (keyboard-event-key-name event) :|Q|)
-               (not (zerop (logand (event-modifier-state event) +control-key+))))
-      (let ((fm (first (port-frame-managers port))))
-        (when fm
-          (let ((frames (frame-manager-frames fm)))
-            (when frames
-              (frame-exit (first frames))
-              (return-from distribute-event)))))
-      (return-from distribute-event))
-    ;; Intercept terminal-specific keys (Ctrl-Tab, PgUp/PgDn)
+    ;; NOTE: Ctrl-Q is NOT intercepted here.  It flows through as a normal
+    ;; key event and is handled as a keystroke accelerator (com-charmed-quit
+    ;; in charmed-global-command-table) on the main thread.  Calling
+    ;; frame-exit from the I/O thread doesn't work because the handler-case
+    ;; in run-frame-top-level only catches on the main thread.
+    ;;
+    ;; Intercept terminal-specific keys (scroll, focus cycling)
     (let ((intercepted (charmed-intercept-key-event port event)))
       (when intercepted
         (return-from distribute-event)))
@@ -468,8 +492,21 @@ first frame's top-level-sheet, or the graft."
               (let ((queue (frame-event-queue frame)))
                 (when queue
                   (queue-append queue event)))
-              ;; Normal mode: dispatch to focused pane for DREI
-              (dispatch-event focused event)))))
+              ;; Normal mode: dispatch to the pane the main thread reads from.
+              ;; In default-frame-top-level, read-frame-command reads from
+              ;; frame-standard-input (frame-query-io), NOT port-keyboard-input-focus.
+              ;; Dispatching to the focused pane after Tab would send events to a
+              ;; pane whose queue the main thread never reads.
+              ;; In charmed-frame-top-level, events go to focused pane as before.
+              (let ((target (if (charmed-port-custom-top-level-p port)
+                                focused
+                                (or (climi::frame-standard-input frame) focused))))
+                (when (member (keyboard-event-key-name event) '(:up :down :tab))
+                  (clim-charmed::charmed-debug-log
+                   "DISPATCH ~S → target=~S focused=~S"
+                   (keyboard-event-key-name event)
+                   target focused))
+                (dispatch-event target event))))))
     (return-from distribute-event))
   ;; For pointer events, bypass the mirror-based sheet traversal.
   ;; Our mouse events already have the correct target pane and

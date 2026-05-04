@@ -2,14 +2,24 @@
 ;;;
 ;;; startup.lisp — User-facing startup helpers for the charmed backend
 ;;;
-;;; This file provides simple entry points for running McCLIM applications
-;;; on the charmed terminal backend, hiding internal API details.
+;;; These are thin convenience wrappers around the standard McCLIM startup
+;;; path.  They handle port lifecycle (creation via find-port, cleanup via
+;;; destroy-port) so the terminal state is always restored, even on error.
 ;;;
-;;; Usage:
-;;;   (clim-charmed:run-frame-on-charmed 'my-application-frame)
+;;; Applications are NOT required to use these helpers.  The standard path
+;;; works directly:
 ;;;
-;;; Or with options:
-;;;   (clim-charmed:run-frame-on-charmed 'my-app :width 80 :height 24)
+;;;   (let* ((port (clim:find-port :server-path '(:charmed)))
+;;;          (fm   (clim:find-frame-manager :port port))
+;;;          (frame (clim:make-application-frame 'my-app :frame-manager fm)))
+;;;     (unwind-protect (clim:run-frame-top-level frame)
+;;;       (clim:destroy-port port)))
+;;;
+;;; The charmed backend's adopt-frame automatically handles:
+;;;   - Replacing concurrent-queue with simple-queue for terminal event pumping
+;;;   - Suppressing menu-bar and pointer-documentation panes
+;;;   - Wiring queue-port on sheet event queues
+;;;   - Sizing the top-level sheet to fill the terminal
 
 (in-package #:clim-charmed)
 
@@ -33,8 +43,15 @@
      (clim-charmed:run-frame-on-charmed 'my-app)
      (clim-charmed:run-frame-on-charmed 'my-app :frame-args '(:title \"My App\"))
 
-   The terminal is automatically cleaned up when the frame exits, even on error."
-  (let* ((port (make-instance 'charmed-port :server-path '(:charmed)))
+   The terminal is automatically cleaned up when the frame exits, even on error.
+
+   This is a convenience wrapper.  Equivalent to:
+     (let* ((port (find-port :server-path '(:charmed)))
+            (fm   (first (frame-managers port)))
+            (frame (make-application-frame 'my-app :frame-manager fm)))
+       (unwind-protect (run-frame-top-level frame)
+         (destroy-port port)))"
+  (let* ((port (find-port :server-path '(:charmed)))
          (fm (first (port-frame-managers port))))
     (when (or width height)
       (let* ((size (charmed:terminal-size))
@@ -59,9 +76,6 @@
                                                            (exit-on-close nil))
   "Run an application frame that uses default-frame-top-level with an interactor.
 
-   This variant creates the event queues needed for McCLIM's standard
-   command loop (accept/read-gesture) to work correctly with the terminal.
-
    FRAME-CLASS is the symbol naming a define-application-frame class.
    The frame should have an :interactor pane and use default-frame-top-level.
 
@@ -70,16 +84,17 @@
    EXIT-ON-CLOSE, if true, calls (uiop:quit 0) after the frame closes.
 
    Example:
-     (clim-charmed:run-frame-on-charmed-with-interactor 'my-repl-app)"
-  (let* ((port (make-instance 'charmed-port :server-path '(:charmed)))
-         (fm (first (port-frame-managers port)))
-         (event-queue (make-instance 'climi::simple-queue :port port))
-         (input-buffer (make-instance 'climi::simple-queue :port port)))
+     (clim-charmed:run-frame-on-charmed-with-interactor 'my-repl-app)
+
+   This is a convenience wrapper.  The adopt-frame method on charmed-frame-manager
+   automatically replaces concurrent queues with simple queues, so no manual
+   queue creation is needed.  Equivalent to:
+     (clim-charmed:run-frame-on-charmed frame-class :frame-args frame-args)"
+  (let* ((port (find-port :server-path '(:charmed)))
+         (fm (first (port-frame-managers port))))
     (unwind-protect
          (let ((frame (apply #'make-application-frame frame-class
                              :frame-manager fm
-                             :frame-event-queue event-queue
-                             :frame-input-buffer input-buffer
                              frame-args)))
            (run-frame-top-level frame))
       (destroy-port port)

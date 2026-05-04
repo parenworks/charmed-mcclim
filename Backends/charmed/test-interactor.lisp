@@ -75,3 +75,12 @@
   (clim-charmed:run-frame-on-charmed-with-interactor
    'interactor-test
    :exit-on-close exit-lisp))
+
+(defun run-standard ()
+  "Run using standard CLIM startup."
+  (setf *message-count* 0)
+  (let* ((port (find-port :server-path '(:charmed)))
+         (fm (first (climi::frame-managers port)))
+         (frame (make-application-frame 'interactor-test :frame-manager fm)))
+    (unwind-protect (run-frame-top-level frame)
+      (destroy-port port))))

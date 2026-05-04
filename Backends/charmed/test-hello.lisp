@@ -21,8 +21,7 @@
             :display-function 'display-main
             :scroll-bars nil))
   (:layouts
-   (default display))
-  (:top-level (clim-charmed:charmed-frame-top-level)))
+   (default display)))
 
 (defun display-main (frame pane)
   (declare (ignore frame))
@@ -39,3 +38,11 @@
 (defun run ()
   "Run the hello-charmed frame on the charmed terminal backend."
   (clim-charmed:run-frame-on-charmed 'hello-charmed))
+
+(defun run-standard ()
+  "Run using pure standard CLIM startup — zero clim-charmed: references."
+  (let* ((port (find-port :server-path '(:charmed)))
+         (fm (first (climi::frame-managers port)))
+         (frame (make-application-frame 'hello-charmed :frame-manager fm)))
+    (unwind-protect (run-frame-top-level frame)
+      (destroy-port port))))

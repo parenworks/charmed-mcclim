@@ -270,7 +270,7 @@ hooks for display, layout, and event processing.
 - **`adopt-frame :after`** — sizes top-level sheet to terminal dimensions, sets `stream-vertical-spacing` to 0 on all `clim-stream-pane` instances, caps `border-width` to 1 on `spacing-pane` subclasses (borders consume full character rows in terminal), wires `queue-port` on every sheet's event queue so `process-next-event` can pump input
 - **`note-frame-enabled`** — enables top-level sheet, triggers initial `layout-frame` at terminal size, post-layout transformation clamping (moves off-screen panes into terminal bounds), screen buffer resize, and medium type fixup
 - **`redisplay-frame-panes :before`** — calls `capture-pane-viewport-sizes` then `pre-clear-dirty-panes` (charmed port only)
-- **`redisplay-frame-panes :after`** — auto-scrolls panes to bottom when content exceeds viewport, then calls `port-force-output` (charmed port only)
+- **`redisplay-frame-panes :after`** — auto-scrolls panes to bottom when content exceeds viewport (custom top-level only; disabled in standard mode so panes start at offset 0), then calls `port-force-output` (charmed port only)
 - **`read-frame-command :around`** — binds `*partial-command-parser*` to `charmed-read-remaining-arguments-for-partial-command` when on a charmed port
 - **`input-editor-format :around`** — suppresses DREI noise-string insertion (package hints like "(CL-USER)") on charmed port to prevent display corruption
 - **`compose-space :around`** on `clim-stream-pane` — scales pixel-sized space requirements to terminal-appropriate sizes; interactor panes get a reserved portion (1/6 of terminal height), non-interactor panes get the remainder
@@ -338,10 +338,10 @@ Events are processed in this order:
 
 **Key events:**
 
-1. **Ctrl-Q** — calls `frame-exit` on the first frame (quit)
-2. **Interception** — `charmed-intercept-key-event` handles Tab, arrows, PgUp/PgDn (see [Key Handling](#key-handling))
-3. **Raw key mode** — if `charmed-frame-wants-raw-keys-p` returns T for the frame, key events are queued directly to the frame's event queue (bypassing per-pane dispatch) so `read-frame-command` can dequeue them
-4. **Normal mode** — key events are dispatched to the focused pane via `dispatch-event` for DREI input editing
+1. **Interception** — `charmed-intercept-key-event` handles Tab (custom top-level only), arrows, PgUp/PgDn (see [Key Handling](#key-handling)). Ctrl-Q is handled as a keystroke accelerator via `charmed-global-command-table`, not intercepted here.
+2. **Raw key mode** — if `charmed-frame-wants-raw-keys-p` returns T for the frame, key events are queued directly to the frame's event queue (bypassing per-pane dispatch) so `read-frame-command` can dequeue them
+3. **Standard mode** (`default-frame-top-level`) — key events are dispatched to `frame-standard-input` (the pane the main thread reads commands from), ensuring commands work correctly after Tab focus cycling
+4. **Custom mode** (`charmed-frame-top-level`) — key events are dispatched to the focused pane via `dispatch-event`
 
 **Pointer events:**
 
@@ -402,6 +402,20 @@ or `sheet-region` height as fallback. Returns 10 on error.
 viewport height. If content exceeds the viewport, the scroll offset is set to
 `content-height - viewport-height` so the latest output is always visible.
 
+**Note:** Auto-scroll is only active when using `charmed-frame-top-level`
+(custom top-level mode). In standard CLIM mode (`default-frame-top-level`),
+panes start at offset 0 and the user scrolls manually with arrow keys.
+
+### Scroll modes
+
+Each pane has a scroll mode (`:auto` or `:manual`) stored per-pane in the port.
+
+- **`:auto`** (default) — auto-scroll keeps pane at bottom of content
+- **`:manual`** — user-initiated scroll; auto-scroll does not override position
+
+Any user scroll (Up/Down/PgUp/PgDn) that doesn't reach max-scroll switches to
+`:manual` mode. Reaching max-scroll switches back to `:auto`.
+
 ### Pre-clear before redisplay
 
 `pre-clear-dirty-panes` clears the screen area of each pane marked for redisplay
@@ -442,8 +456,10 @@ which separator lines should be highlighted.
 
 ### Visual indicator
 
-Separator lines adjacent to the focused pane are drawn in green.
-Unfocused pane separators use the terminal's default color.
+Separator lines adjacent to the focused pane are drawn in cyan.
+Unfocused pane separators are drawn in dim gray (bright-black).
+For both vrack and hrack layouts, a separator is highlighted if
+either adjacent pane contains the focused pane.
 
 ### Tab behavior
 
@@ -467,8 +483,11 @@ Called by `port-force-output` before `charmed:screen-present`.
 - **Horizontal splits** (`hrack-pane` from `horizontally`) — vertical separator lines using `┃`, drawn across the full parent height
 
 Separator lines adjacent to the focused pane (determined by
-`child-contains-focused-p`) are drawn in green. The function recurses into
-nested layout composites, supporting mixed vertical/horizontal splits.
+`child-contains-active-p`) are drawn in cyan. Both vrack and hrack
+layouts check both neighbors of each separator, so a border between
+two panes is highlighted if either contains the focused pane. The
+function recurses into nested layout composites, supporting mixed
+vertical/horizontal splits.
 
 ### capture-pane-viewport-sizes
 
@@ -591,7 +610,7 @@ Handles terminal-global keys before they reach pane event queues. Called from
 
 | Key | Action | Condition |
 | --- | ------ | --------- |
-| Tab | `cycle-focus` + redisplay | Only when `custom-top-level-p` is T |
+| Tab | `cycle-focus` + redisplay | Only when `custom-top-level-p` is T (in standard mode, Tab is a keystroke accelerator) |
 | Up | Scroll focused pane up 1 line + redisplay | |
 | Down | Scroll focused pane down 1 line + redisplay | |
 | PgUp (`:prior`) | Scroll up one page + redisplay | |
@@ -803,7 +822,7 @@ Vertical separator lines (`┃`) are drawn between horizontally split panes.
 | ---- | --------- | ----------- |
 | `test-hello.lisp` | `charmed-frame-top-level` | Single-pane hello world with Ctrl-Q exit |
 | `test-multi-pane.lisp` | `charmed-frame-top-level` | Two vertically stacked panes with scrolling, focus cycling, text styles, and colors |
-| `test-hsplit.lisp` | `charmed-frame-top-level` | Horizontal split — two side-by-side panes with vertical separator |
+| `test-hsplit.lisp` | both | Horizontal split — two side-by-side panes with vertical separator (`run` for custom, `run-standard` for standard) |
 | `test-interactor.lisp` | `default-frame-top-level` | Command input with argument prompting (Hello, Count, Say, Clear, Quit) |
 | `test-presentations.lisp` | `default-frame-top-level` | Clickable fruit list — presentation translators, mouse click → command |
 | `test-listener.lisp` | `default-frame-top-level` | Terminal-native Lisp Listener with eval, describe, package, help commands |

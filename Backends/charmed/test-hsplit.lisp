@@ -23,8 +23,8 @@
     (with-drawing-options (pane :ink +green+)
       (format pane "  Green text in left pane~%"))
     (terpri pane)
-    (loop for i from 1 to 30
-          do (format pane "  Left line ~2D~%" i))))
+    (loop for i from 1 to 100
+          do (format pane "  Left line ~3D~%" i))))
 
 (defun display-right (frame pane)
   (let* ((port (port (frame-manager frame)))
@@ -36,8 +36,8 @@
     (with-drawing-options (pane :ink +magenta+)
       (format pane "  Magenta text in right pane~%"))
     (terpri pane)
-    (loop for i from 1 to 30
-          do (format pane "  Right line ~2D~%" i))))
+    (loop for i from 1 to 100
+          do (format pane "  Right line ~3D~%" i))))
 
 (define-application-frame hsplit-test ()
   ()
@@ -52,8 +52,15 @@
    (default
     (horizontally ()
       (1/2 left-pane)
-      (1/2 right-pane))))
-  (:top-level (clim-charmed:charmed-frame-top-level)))
+      (1/2 right-pane)))))
 
 (defun run ()
   (clim-charmed:run-frame-on-charmed 'hsplit-test))
+
+(defun run-standard ()
+  "Run using standard CLIM startup."
+  (let* ((port (find-port :server-path '(:charmed)))
+         (fm (first (climi::frame-managers port)))
+         (frame (make-application-frame 'hsplit-test :frame-manager fm)))
+    (unwind-protect (run-frame-top-level frame)
+      (destroy-port port))))
