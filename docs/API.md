@@ -24,6 +24,10 @@ built on [charmed](https://github.com/parenworks/charmed).
 - [Partial Command Parser](#partial-command-parser)
 - [Text Cursor Tracking](#text-cursor-tracking)
 - [Terminal Metrics Fallbacks](#terminal-metrics-fallbacks)
+- [Gadget Panes](#gadget-panes)
+- [CLIM Dialogs](#clim-dialogs)
+- [Thread Safety](#thread-safety)
+- [Dynamic Screen Buffer](#dynamic-screen-buffer)
 - [Writing an Application](#writing-an-application)
 - [Test Applications](#test-applications)
 - [Known Limitations](#known-limitations)
@@ -51,6 +55,7 @@ protocols, translating McCLIM drawing and event operations to charmed terminal I
 | `charmed-frame-top-level` | function | Custom top-level loop for non-interactor apps |
 | `charmed-handle-key-event` | generic | Per-frame key event handler (used by `charmed-frame-top-level`) |
 | `charmed-frame-wants-raw-keys-p` | generic | Return T to receive arrow/scroll keys in frame event queue |
+| `ensure-screen-capacity` | function | Grow screen buffer on demand for dynamic content |
 
 ---
 
@@ -129,6 +134,8 @@ resize) into McCLIM events. Created automatically when a frame is run with the
 | `last-present-time` | `charmed-port-last-present-time` | `internal-real-time` of last `screen-present`, for throttling |
 | `modifier-state` | `charmed-port-modifier-state` | Current modifier key bitmask |
 | `custom-top-level-p` | `charmed-port-custom-top-level-p` | T when `charmed-frame-top-level` is active |
+| `state-lock` | `charmed-port-state-lock` | `clim-sys:make-lock` protecting shared mutable state between I/O and main threads |
+| `scroll-modes` | `charmed-port-scroll-modes` | Hash table: pane → `:auto` or `:manual` scroll mode |
 
 **Port lifecycle:**
 
@@ -177,14 +184,14 @@ are character cells (1 char = 1 unit width, 1 unit height).
 | ------ | --------------------- |
 | `medium-draw-text*` | `charmed:screen-write-string` with style mapping, text alignment (`:left`, `:center`, `:right`), and clipping |
 | `medium-draw-rectangle*` | Filled: space chars with bg color; Unfilled: box-drawing chars (`┌┐└┘─│`) |
-| `medium-draw-line*` | `─` for horizontal, `│` for vertical (clipped per-cell) |
+| `medium-draw-line*` | `─` for horizontal, `│` for vertical, `/` and `\` for diagonal (Bresenham's algorithm) |
 | `medium-draw-point*` | `·` character |
 | `medium-draw-points*` | Iterates `medium-draw-point*` |
 | `medium-draw-lines*` | Iterates `medium-draw-line*` |
 | `medium-draw-rectangles*` | Iterates `medium-draw-rectangle*` |
 | `medium-clear-area` | `charmed:screen-fill-rect` with spaces, clipped to pane bounds |
 | `medium-draw-polygon*` | No-op (not practical in terminal) |
-| `medium-draw-ellipse*` | No-op (not practical in terminal) |
+| `medium-draw-ellipse*` | Filled: `█` horizontal spans; Outline: `·` perimeter sampling. Axis-aligned ellipses and circles. |
 | `medium-finish-output` | `charmed:screen-present` |
 | `medium-force-output` | Delegates to `medium-finish-output` |
 | `medium-beep` | Writes `#\Bel` to `*terminal-io*` |
@@ -192,8 +199,9 @@ are character cells (1 char = 1 unit width, 1 unit height).
 
 **Rectangle filtering:** `medium-draw-rectangle*` includes special-case logic
 to prevent parent composite sheets (`vrack-pane`, `outlined-pane`) from drawing
-full-screen background clears that wipe child pane content. It also avoids
-clearing the focused interactor pane during editing (height > 2 threshold).
+full-screen background clears that wipe child pane content. For stream panes,
+filled rects covering ≥90% of the pane area that use background ink
+(`pane-background`, `+background-ink+`, or `+white+`) are skipped.
 
 **Coordinate transform:** `sheet-to-screen` maps sheet-local coordinates to
 absolute screen positions. It first applies `medium-transformation` (for DREI
@@ -273,7 +281,9 @@ hooks for display, layout, and event processing.
 - **`redisplay-frame-panes :after`** — auto-scrolls panes to bottom when content exceeds viewport (custom top-level only; disabled in standard mode so panes start at offset 0), then calls `port-force-output` (charmed port only)
 - **`read-frame-command :around`** — binds `*partial-command-parser*` to `charmed-read-remaining-arguments-for-partial-command` when on a charmed port
 - **`input-editor-format :around`** — suppresses DREI noise-string insertion (package hints like "(CL-USER)") on charmed port to prevent display corruption
-- **`compose-space :around`** on `clim-stream-pane` — scales pixel-sized space requirements to terminal-appropriate sizes; interactor panes get a reserved portion (1/6 of terminal height), non-interactor panes get the remainder
+- **`frame-manager-notify-user`** — terminal-friendly notification: prints message on `*query-io*` with numbered exit boxes
+- **`frame-manager-menu-choose`** — terminal-friendly menu: prints numbered items on `*query-io*` with default-item marker and numeric selection, returns `(values item-value item gesture)`
+- **`compose-space :around`** on `clim-stream-pane` — scales pixel-sized space requirements to terminal-appropriate sizes; activates when height exceeds terminal height (not 2×). Interactor panes get a reserved portion (1/6 of terminal height), non-interactor panes get the remainder
 - **`note-space-requirements-changed`** — suppresses relayout propagation on charmed port; content expansion must not trigger parent composite relayout which would replay stale output records
 
 ---
@@ -377,6 +387,10 @@ Y coordinates in `sheet-to-screen`, shifting the pane's content up.
 Adjusts scroll offset by `delta` rows (positive = down). Clamped to
 `[0, content-height - viewport-height]` so the pane never scrolls past the
 last line of content. Sets `pane-needs-redisplay` when the offset changes.
+
+**Thread safety:** Acquires `charmed-port-state-lock` since this function
+is called from the I/O thread while the main thread reads scroll offsets
+during redisplay.
 
 ### pane-content-height
 
@@ -713,6 +727,99 @@ to the charmed screen for any `basic-medium` attached to a charmed port sheet.
 
 ---
 
+## Gadget Panes
+
+Terminal-friendly concrete gadget classes defined in `gadgets.lisp`.
+`find-concrete-pane-class` on `charmed-frame-manager` routes abstract
+CLIM gadget types to these classes automatically.
+
+| Abstract type | Charmed class | Terminal rendering |
+| ------------- | ------------- | ------------------ |
+| `push-button` | `charmed-push-button-pane` | `[ OK ]` (armed: `( OK )`) |
+| `toggle-button` | `charmed-toggle-button-pane` | `[x] Label` / `[ ] Label` |
+| `slider` | `charmed-slider-pane` | `[──\|───] 5.0` (click sets value) |
+| `list-pane` | `charmed-list-pane` | Items listed with `> ` selection marker |
+| `option-pane` | `charmed-option-pane` | `[value ▾]` |
+
+Each class overrides `compose-space` (returns character-cell dimensions) and
+`handle-repaint` (draws using `medium-draw-text*` and box-drawing characters).
+
+---
+
+## CLIM Dialogs
+
+### notify-user
+
+```lisp
+(notify-user frame message &key title exit-boxes ...)
+```
+
+Terminal implementation prints the message on `*query-io*`. For a single
+exit box (default `((:exit "OK"))`), prompts `[Press Enter]`. For multiple
+boxes, presents numbered choices and reads a numeric selection.
+
+### menu-choose
+
+```lisp
+(menu-choose items &key label default-item ...)
+```
+
+Terminal implementation prints numbered items on `*query-io*` with a `*`
+marker on the default item. Reads a numeric choice and returns
+`(values item-value item nil)`.
+
+### accepting-values
+
+```lisp
+(accepting-values (stream) body...)
+```
+
+Terminal override (installed at load time) detects charmed-port and runs
+the continuation directly on the stream. Each `accept` call within the
+body prompts sequentially on the interactor rather than creating a GUI
+dialog. Non-charmed ports delegate to the original McCLIM implementation.
+
+---
+
+## Thread Safety
+
+The charmed backend uses two threads:
+
+1. **I/O thread** — runs inside `process-next-event`, polls terminal input
+2. **Main thread** — runs frame top-level, calls redisplay
+
+Shared mutable state is protected by `charmed-port-state-lock`
+(`clim-sys:make-lock`):
+
+| State | Writer | Reader | Protected |
+| ----- | ------ | ------ | --------- |
+| `resize-pending` | I/O thread (resize handler) | Main thread (`%apply-pending-resize`) | Yes — lock around set and atomic read+clear |
+| `scroll-offsets` | I/O thread (`scroll-pane`) | Main thread (rendering, auto-scroll) | Yes — `scroll-pane` holds lock during read-modify-write; auto-scroll holds lock during write |
+| `scroll-modes` | I/O thread (`scroll-pane`) | Main thread (auto-scroll check) | Yes — written inside `scroll-pane`'s lock |
+| `pane-needs-redisplay` | I/O thread (`scroll-pane`) | Main thread (redisplay check) | Yes — set inside `scroll-pane`'s lock |
+
+Individual hash table reads during high-frequency rendering (e.g.,
+`pane-scroll-offset` in `sheet-to-screen`) are **not** locked. SBCL hash
+table reads are safe against concurrent writes (may return stale values
+but won't crash). The lock protects compound read-modify-write sequences.
+
+---
+
+## Dynamic Screen Buffer
+
+```lisp
+(ensure-screen-capacity screen col row)
+```
+
+Grows the charmed screen buffer if `(col, row)` exceeds current dimensions.
+Growth is amortized with 25% headroom to avoid repeated resizing.
+
+Called automatically before text drawing in `charmed-draw-text`. This ensures
+streaming output that extends beyond the initial buffer (sized in
+`note-frame-enabled`) is not silently clipped.
+
+---
+
 ## Writing an Application
 
 ### Using default-frame-top-level (recommended)
@@ -811,7 +918,7 @@ Vertical separator lines (`┃`) are drawn between horizontally split panes.
 
 - **`:scroll-bars nil`** — required on all panes. McCLIM's scroll bar wrappers (`viewport-pane`, `scroller-pane`) require mirror geometry support that the charmed backend doesn't provide (causes heap exhaustion).
 - **`simple-queue`** — use `climi::simple-queue` for `frame-event-queue` and `frame-input-buffer` when using `default-frame-top-level`. `simple-queue` calls `process-next-event` to pump terminal input; `concurrent-queue` blocks on a condition variable expecting a separate event thread. Not needed for `charmed-frame-top-level` which pumps events directly.
-- **No gadgets** — menu bar, push buttons, and other GUI gadgets are not supported. The frame manager suppresses menu bar and pointer-documentation panes automatically. Use commands and presentations instead.
+- **Terminal gadgets** — push-button, toggle-button, slider, list-pane, and option-pane are supported via charmed-specific subclasses in `gadgets.lisp`. `find-concrete-pane-class` on `charmed-frame-manager` routes abstract gadget types to terminal-friendly concrete classes. The frame manager still suppresses menu bar and pointer-documentation panes.
 - **`stream-vertical-spacing`** — automatically set to 0 by `adopt-frame :after`. McCLIM's default of 2 causes 3-row line height in a 1-cell terminal.
 
 ---
@@ -837,10 +944,10 @@ Vertical separator lines (`┃`) are drawn between horizontally split panes.
 - **`sheet-native-transformation`** is identity for all sheets — coordinate offsetting handled in medium via frozen viewport geometry
 - **Header lines** scroll with content (no sticky header support)
 - **Tab completion** conflicts with Tab focus cycling in `charmed-frame-top-level` (in `default-frame-top-level`, Tab passes through to DREI correctly)
-- **`accepting-values` dialogs** not yet supported (partial command parser works around the immediate need)
-- **No drawing graphics** — polygons and ellipses are no-ops; lines limited to horizontal/vertical
+- **`accepting-values` dialogs** — terminal override runs the continuation directly on the stream; `accept` calls prompt sequentially
+- **Limited graphics** — polygons are no-ops; ellipses approximated with character art; lines support horizontal, vertical, and diagonal
 - **Single-size monospace** — font family and size are ignored (terminal constraint)
-- **Layout overflow** — McCLIM's GUI-oriented layout engine may allocate more rows than the terminal has (e.g., `:height 500` treated as 500 character rows). The backend clamps pane transformations post-layout, but panes may get less space than requested
+- **Layout overflow** — McCLIM's GUI-oriented layout engine may allocate more rows than the terminal has (e.g., `:height 500` treated as 500 character rows). The backend clamps space requirements exceeding terminal height and post-layout transformations, but panes may get less space than requested. The screen buffer grows dynamically via `ensure-screen-capacity` to handle content that exceeds initial sizing
 - **Non-interactor examples** — standard McCLIM examples without an interactor pane cannot be exited with Ctrl-Q (they use `default-frame-top-level` which blocks in `accept`). Use the process kill to exit
 
 ---

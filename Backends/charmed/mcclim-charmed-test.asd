@@ -17,7 +17,15 @@
   :components ((:file "package")
                (:file "scroll-tests" :depends-on ("package"))
                (:file "key-translation-tests" :depends-on ("package"))
-               (:file "viewport-tests" :depends-on ("package")))
+               (:file "viewport-tests" :depends-on ("package"))
+               (:file "compat-tests" :depends-on ("package"))
+               (:file "medium-tests" :depends-on ("package"))
+               (:file "intercept-tests" :depends-on ("package"))
+               (:file "table-format-tests" :depends-on ("package"))
+               (:file "gadget-tests" :depends-on ("package"))
+               (:file "integration-tests" :depends-on ("package"))
+               (:file "headless" :depends-on ("package"))
+               (:file "headless-tests" :depends-on ("package" "headless")))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :charmed-backend-suite

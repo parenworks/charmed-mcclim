@@ -38,30 +38,22 @@
 
 ## Pending
 
-- [ ] **Tab completion in DREI/accept**
+See `CLIM-2.0-GAPS.md` for the comprehensive gap analysis and priority list.
+
+- [x] **Tab completion in DREI/accept**
   Tab currently cycles focus between panes. Need a way to route Tab to
   DREI's completion machinery when the interactor is accepting input.
   Conflict: Tab = focus cycle vs Tab = completion.
 
-- [ ] **`accepting-values` dialogs**
+- [x] **`accepting-values` dialogs**
   McCLIM's structured input dialogs. Needs form-style field editing
   in the terminal.
 
-- [x] **`horizontally` layout**
-  Side-by-side panes working with vertical separator lines (`┃`).
-  `draw-pane-borders` handles `hrack-pane`. Test: `test-hsplit.lisp`.
-
-- [ ] **Drawing operations**
+- [x] **Drawing operations**
   Lines, ellipses, polygons are stubbed or basic. Terminal can do
   box-drawing characters for lines/rectangles but not general graphics.
   Need at least: `medium-draw-line*` using box-drawing chars,
   better `medium-draw-polygon*` stub.
-
-- [x] **Update API.md**
-  Rewritten to document the McCLIM backend API: all backend classes (port,
-  medium, graft, frame-manager), event processing, scrolling, focus, pane
-  borders, presentation clicking, key handling, raw key mode, partial command
-  parser, text cursor tracking, terminal metrics fallbacks, and test applications.
 
 ## Exit Criteria (Phase 6)
 

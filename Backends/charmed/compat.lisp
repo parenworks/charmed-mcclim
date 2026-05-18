@@ -63,6 +63,25 @@
 (in-package #:clim-charmed)
 
 ;;;============================================================================
+;;; ERROR HANDLING
+;;;============================================================================
+
+(defvar *charmed-backend-warnings* t
+  "When non-NIL, log backend warnings to *ERROR-OUTPUT*.
+   Set to NIL to suppress all warnings (not recommended for development).
+   Set to a stream to redirect warnings.")
+
+(defun charmed-backend-warn (context condition)
+  "Log a backend warning with CONTEXT string and CONDITION.
+   Output goes to *charmed-backend-warnings* (T = *error-output*, stream, NIL = silent)."
+  (when *charmed-backend-warnings*
+    (let ((stream (if (streamp *charmed-backend-warnings*)
+                      *charmed-backend-warnings*
+                      *error-output*)))
+      (format stream "~&;; charmed-mcclim warning [~A]: ~A~%" context condition)
+      (finish-output stream))))
+
+;;;============================================================================
 ;;; A. PORT INTERNALS
 ;;;============================================================================
 
@@ -386,11 +405,74 @@
   (climi::parse-command command-name arg-parser del-parser stream))
 
 ;;;============================================================================
+;;; I. FRAME PANE LOOKUP
+;;;============================================================================
+
+(defun find-pane-of-type (panes type)
+  "Search PANES for a pane of the given TYPE.
+   
+   WHY INTERNAL: climi::find-pane-of-type is internal.
+   
+   WHY WE NEED IT: The charmed backend checks whether a frame has an
+   interactor pane to decide whether navigation command tables (scroll,
+   focus cycling) should be inherited as keystroke accelerators."
+  (climi::find-pane-of-type panes type))
+
+(defun frame-standard-input (frame)
+  "Return the standard input pane for FRAME (frame-query-io).
+   
+   WHY INTERNAL: climi::frame-standard-input is internal.
+   
+   WHY WE NEED IT: In default-frame-top-level, read-frame-command reads
+   from frame-standard-input, NOT port-keyboard-input-focus.  Key events
+   must be dispatched to this pane so the main thread can dequeue them."
+  (climi::frame-standard-input frame))
+
+(defun command-table-inherit-menu (table)
+  "Return the inherit-menu value for command TABLE.
+   
+   WHY INTERNAL: clim-internals::inherit-menu is internal.
+   
+   WHY WE NEED IT: The charmed backend sets inherit-menu to :keystrokes
+   so keystroke accelerators (Ctrl-Q quit, scroll commands) are visible
+   to read-command-using-keystrokes in default-frame-top-level."
+  (clim-internals::inherit-menu table))
+
+(defun (setf command-table-inherit-menu) (value table)
+  "Set the inherit-menu value for command TABLE."
+  (setf (slot-value table 'clim-internals::inherit-menu) value))
+
+;;;============================================================================
+;;; J. CLOS METHOD SPECIALIZER CLASSES (CANNOT BE WRAPPED)
+;;;============================================================================
+
+;;; The following climi:: class references appear directly in defmethod
+;;; specializer lists in other files.  CLOS dispatch requires the actual
+;;; class object, so these CANNOT be replaced with helper functions.
+;;; They are documented here so that grep for "climi::" in compat.lisp
+;;; captures the full picture.
+;;;
+;;; 1. climi::composite-pane
+;;;    Used in: frame-manager.lisp — (defmethod note-space-requirements-changed
+;;;                                   ((pane climi::composite-pane) (changed pane)))
+;;;    WHY: Suppress relayout propagation from content expansion on charmed port.
+;;;
+;;; 2. climi::standard-text-cursor
+;;;    Used in: medium.lisp — (defmethod draw-design
+;;;                            ((sheet clim-stream-pane)
+;;;                             (cursor climi::standard-text-cursor) ...))
+;;;    WHY: Suppress graphical cursor drawing; terminal uses hardware cursor.
+
+;;;============================================================================
 ;;; DOCUMENTATION FOOTER
 ;;;============================================================================
 
 ;;; To find all uses of these helpers in the codebase:
 ;;;   grep -r "climi::" Backends/charmed/*.lisp
+;;;
+;;; Remaining UNAVOIDABLE direct climi:: references (CLOS specializers):
+;;;   frame-manager.lisp: climi::composite-pane (method specializer)
+;;;   medium.lisp: climi::standard-text-cursor (method specializer)
 ;;;
 ;;; When a new McCLIM version is released:
 ;;; 1. Check if any climi:: symbols have been removed or renamed

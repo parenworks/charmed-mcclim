@@ -19,7 +19,7 @@ charmed-mcclim/
 │   ├── frame-manager.lisp      Frame/pane management, layout, focus
 │   ├── compat.lisp             McCLIM internal API compatibility layer
 │   ├── startup.lisp            User-facing startup helpers
-│   ├── tests/                  Backend test suite (51 tests)
+│   ├── tests/                  Backend test suite (255 tests)
 │   └── test-*.lisp             Example applications
 ├── src/                        ← LEGACY: Standalone CLIM-inspired framework
 │   └── *.lisp                  (Phases 1-5, not McCLIM, historical)
@@ -41,10 +41,11 @@ charmed-mcclim/
 - **Pane borders** — horizontal (`━`) and vertical (`┃`) separator lines between panes, focused pane highlighted in cyan
 - **Command processing** — `default-frame-top-level`, `accept`/`present`, DREI input editor
 - **Partial command parser** — terminal-friendly argument prompting for keystroke-invoked commands (replaces GUI `accepting-values` dialog)
+- **Terminal `accepting-values`** — sequential prompting override for `accepting-values` dialogs (GUI version creates un-clickable buttons in terminal)
 - **Per-pane scrolling** — Up/Down/PgUp/PgDn with scroll clamping
 - **Auto-scroll** — new output automatically scrolls panes to bottom (custom top-level only; standard mode starts at top)
 - **Standard CLIM startup** — apps using `default-frame-top-level` run unchanged; no backend-specific `:top-level` override needed
-- **Focus cycling** — Tab moves between panes with visual indicator
+- **Focus cycling** — Tab moves between panes with visual indicator; context-aware Tab routing (completion when DREI active, focus cycle otherwise)
 - **Raw key mode** — `charmed-frame-wants-raw-keys-p` lets frames receive arrow/scroll keys directly for custom navigation
 - **Text styles** — bold, italic, dim, underline mapped to terminal attributes
 - **Color support** — CLIM inks mapped to terminal colors (RGB, named, indirect)
@@ -54,11 +55,18 @@ charmed-mcclim/
 - **Basic-medium fallbacks** — terminal metrics and drawing work correctly even for panes that receive a `basic-medium` from nested layout composites
 - **Input echo** — DREI interactor input (typed characters, command prompts) correctly echoed in terminal via dispatch-repaint/repaint-sheet overrides and medium type fixup
 - **Layout clamping** — post-layout transformation rewriting ensures panes fit within terminal bounds even when McCLIM's GUI-oriented layout engine overflows (e.g., `:height 500` treated as 500 rows)
+- **Terminal gadgets** — push-button (`[ OK ]`), toggle (`[x]`/`[ ]`), slider (`[──|───]`), list-pane, option-pane with text-character rendering
+- **Graphics primitives** — diagonal lines via Bresenham (`/`, `\`), ellipse approximation (filled `█`, outline `·`), box-drawing characters for axis-aligned lines
+- **CLIM dialogs** — `notify-user` (numbered exit boxes), `menu-choose` (numbered items), `accepting-values` (sequential prompts)
+- **Thread safety** — `state-lock` on port protects shared state between I/O and main threads
+- **Dynamic screen buffer** — auto-grows when content exceeds initial sizing
 - **Standard McCLIM examples** — test runner for summation, views, address-book, indentation, stream-test, and town-example
 
 ### CLIM-Inspired Framework (Phases 1–5)
 
-The project also includes a standalone CLIM-inspired framework (`src/`) with its own command tables, presentations, typed forms, and examples. This was the foundation before the McCLIM backend was built.
+The `src/` directory contains a **standalone** CLIM-inspired framework that predates the McCLIM backend. It is a separate product with its own ASDF system (`charmed-mcclim.asd` at project root), its own package (`charmed-mcclim` / `cmcclim`), and **does not depend on McCLIM**. It provides its own command tables, presentations, typed forms, popup menus, and backend lifecycle.
+
+The McCLIM backend (`Backends/charmed/`, ASDF system `mcclim-charmed`) is the active codebase and is a true McCLIM backend. Standard CLIM applications run unchanged on it. The two systems are independent — loading one does not load the other.
 
 ## Quick Start
 
@@ -122,6 +130,7 @@ For frames with an interactor pane (command input):
 - **[DESIGN.md](DESIGN.md)** — Architecture, coordinate pipeline, event model, and implementation details
 - **[Backends/charmed/compat.lisp](Backends/charmed/compat.lisp)** — McCLIM internal API compatibility layer (documents all `climi::` workarounds)
 - **[TODO.md](TODO.md)** — Current status and remaining work
+- **[CLIM-2.0-GAPS.md](CLIM-2.0-GAPS.md)** — CLIM 2.0 compliance gap analysis and priority tracker
 - **[examples/README.md](examples/README.md)** — CLIM-inspired framework examples (Phases 1–5)
 
 ## Architecture

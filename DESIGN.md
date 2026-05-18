@@ -4,7 +4,7 @@
 **Author:** Glenn Thompson  
 **Project:** `charmed-mcclim`  
 **Language:** Common Lisp  
-**Status:** **Complete** — Full McCLIM terminal backend with Listener, presentations, DREI input editing, multi-pane layout, scrolling, focus, colors, mouse support, and 51 backend tests passing.
+**Status:** **Complete** — Full McCLIM terminal backend with Listener, presentations, DREI input editing, multi-pane layout, scrolling, focus, colors, mouse support, terminal `accepting-values`, `notify-user`, `menu-choose`, gadget panes, graphics primitives, thread safety, dynamic screen buffer, and 255 backend tests passing.
 
 ---
 
@@ -1108,11 +1108,16 @@ it to handle application-specific keys:
 
 ## Test Applications
 
-| File | Description |
-|---|---|
-| `test-hello.lisp` | Single-pane hello world with Ctrl-Q exit |
-| `test-multi-pane.lisp` | Two vertically stacked panes with scrolling, focus cycling, and scroll clamping |
-| `test-interactor.lisp` | McCLIM `default-frame-top-level` with interactor pane — command input, argument prompting, text echo |
+| File | Top-level | Description |
+|---|---|---|
+| `test-hello.lisp` | `charmed-frame-top-level` | Single-pane hello world with Ctrl-Q exit |
+| `test-multi-pane.lisp` | `charmed-frame-top-level` | Two vertically stacked panes with scrolling, focus cycling, text styles, colors |
+| `test-hsplit.lisp` | both | Horizontal split with vertical separator (`run` / `run-standard`) |
+| `test-interactor.lisp` | `default-frame-top-level` | Command input with argument prompting (Hello, Count, Say, Clear, Quit) |
+| `test-presentations.lisp` | `default-frame-top-level` | Clickable fruit list — presentation translators, mouse click |
+| `test-listener.lisp` | `default-frame-top-level` | Terminal-native Lisp Listener with eval, describe, package, help |
+| `test-real-listener.lisp` | `default-frame-top-level` | Real McCLIM `clim-listener::listener` on charmed |
+| `test-mcclim-examples.lisp` | both | Standard McCLIM examples (summation, views, address-book, etc.) |
 
 ## Input Focus
 
@@ -1377,13 +1382,96 @@ viewport height. If content exceeds the viewport, the scroll offset is set to
 
 This replaces manual PgDn scrolling for following new output.
 
+## Terminal Gadget Panes
+
+Concrete charmed gadget classes in `gadgets.lisp` provide text-character
+renderings of CLIM's abstract gadget types:
+
+| Abstract type | Charmed class | Terminal rendering |
+|---|---|---|
+| `push-button` | `charmed-push-button-pane` | `[ OK ]` (armed: `( OK )`) |
+| `toggle-button` | `charmed-toggle-button-pane` | `[x] Label` / `[ ] Label` |
+| `slider` | `charmed-slider-pane` | `[──\|───] 5.0` |
+| `list-pane` | `charmed-list-pane` | Items listed with `> ` selection marker |
+| `option-pane` | `charmed-option-pane` | `[value ▾]` |
+
+`find-concrete-pane-class` on `charmed-frame-manager` routes abstract types
+to these classes automatically.
+
+## CLIM Dialog Protocols
+
+### notify-user
+
+`frame-manager-notify-user` on `charmed-frame-manager` prints the message on
+`*query-io*` and prompts with numbered exit boxes (or Enter for a single box).
+Replaces McCLIM's default which creates a GUI frame with push-button gadgets.
+
+### menu-choose
+
+`frame-manager-menu-choose` on `charmed-frame-manager` prints numbered items
+on `*query-io*` with a `*` marker on the default item. Returns
+`(values item-value item nil)`. Replaces McCLIM's popup menu window.
+
+### accepting-values
+
+The `invoke-accepting-values` function is overridden at load time. When on a
+charmed port, the continuation runs directly on the stream and each `accept`
+call prompts sequentially. Non-charmed ports delegate to the original.
+
+## Graphics Primitives
+
+| Method | Terminal rendering |
+|---|---|
+| `medium-draw-line*` | `─` horizontal, `│` vertical, `/` and `\` diagonal (Bresenham) |
+| `medium-draw-ellipse*` | Filled: `█` horizontal spans; Outline: `·` perimeter sampling |
+| `medium-draw-polygon*` | No-op (not practical in terminal) |
+
+### Rectangle heuristic
+
+`medium-draw-rectangle*` skips filled rects from non-stream-pane sheets
+(parent composite background clears). For stream panes, it detects full-pane
+background clears by checking whether the rect covers ≥90% of the pane area
+and uses background ink — these are skipped to prevent wiping child content.
+
+## Thread Safety
+
+The backend has two threads: the I/O thread (inside `process-next-event`)
+and the main thread (frame top-level and redisplay). The `state-lock` slot
+on `charmed-port` (`clim-sys:make-lock`) protects shared mutable state:
+
+- **`scroll-pane`** (I/O thread writer) holds the lock during the full
+  read-modify-write of scroll offsets, scroll modes, and pane-needs-redisplay
+- **resize-pending** set/clear is locked for atomic read+clear in
+  `%apply-pending-resize`
+- **auto-scroll** in `redisplay-frame-panes :after` holds the lock when
+  writing scroll offsets
+
+High-frequency hash table reads during rendering are not locked (safe for
+stale reads on SBCL).
+
+## Dynamic Screen Buffer
+
+`ensure-screen-capacity` in `medium.lisp` grows the charmed screen buffer
+when content extends beyond current dimensions (25% headroom). Called
+automatically before text drawing. This supplements the initial sizing in
+`note-frame-enabled` to handle streaming output.
+
+## Space Requirement Clamping
+
+`compose-space :around` on `clim-stream-pane` clamps any space requirement
+exceeding the terminal height. Interactor panes get a reserved portion
+(1/6 of terminal height); non-interactor panes get the remainder.
+Ratio-based layouts (values ≤ terminal height) pass through unclamped.
+
 ## Known Limitations
 
 - `:scroll-bars t` causes heap exhaustion (viewport/scroller wrappers unsupported)
 - `sheet-native-transformation` is identity — coordinate offsetting handled in medium
-- Header lines scroll with content (no sticky header support yet)
-- Tab completion conflicts with Tab focus cycling (not yet resolved)
-- `accepting-values` dialogs not yet supported
+- Header lines scroll with content (no sticky header support)
+- `accepting-values` runs the continuation directly (no interactive re-prompting)
+- Polygons are no-ops; ellipses and lines are character approximations
+- Single-size monospace — font family and size are ignored
+- Layout overflow may give panes less space than requested despite clamping
 
 ---
 

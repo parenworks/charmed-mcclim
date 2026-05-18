@@ -10,16 +10,6 @@
 
 (in-package #:clim-charmed)
 
-;;; Temporary debug logging — remove when arrow key issue is resolved
-(defvar *charmed-debug-stream* nil)
-(defun charmed-debug-log (fmt &rest args)
-  (unless *charmed-debug-stream*
-    (setf *charmed-debug-stream*
-          (open "/tmp/charmed-debug.log" :direction :output
-                :if-exists :append :if-does-not-exist :create)))
-  (apply #'format *charmed-debug-stream* (concatenate 'string "~&" fmt "~%") args)
-  (finish-output *charmed-debug-stream*))
-
 (defclass charmed-frame-manager (standard-frame-manager)
   ())
 
@@ -52,7 +42,6 @@
                  :keystroke (:up)
                  :name nil)
     ()
-  (charmed-debug-log "CMD scroll-up EXECUTING")
   (let* ((port (port (frame-manager *application-frame*)))
          (sheet (port-keyboard-input-focus port)))
     (when sheet
@@ -93,10 +82,15 @@
                  :keystroke (:tab)
                  :name nil)
     ()
-  (charmed-debug-log "CMD cycle-focus EXECUTING")
   (let* ((port (port (frame-manager *application-frame*)))
          (frame *application-frame*))
-    (cycle-focus frame port)))
+    ;; When DREI is active (accept/read-gesture in progress), don't
+    ;; cycle focus — let the Tab event reach DREI for completion.
+    ;; This resolves the Tab conflict: Tab → completion when DREI
+    ;; is active, Tab → focus cycle otherwise.
+    (if (frame-reading-command-p frame)
+        nil  ; no-op; Tab will be re-dispatched to DREI on next iteration
+        (cycle-focus frame port))))
 
 ;;;============================================================================
 ;;; ADOPT-FRAME
@@ -121,8 +115,8 @@
             (append current-parents (list 'charmed-global-command-table))))
     ;; Enable keystroke inheritance so accelerators are visible to
     ;; read-command-using-keystrokes.
-    (when (null (clim-internals::inherit-menu app-table))
-      (setf (slot-value app-table 'clim-internals::inherit-menu) :keystrokes))))
+    (when (null (command-table-inherit-menu app-table))
+      (setf (command-table-inherit-menu app-table) :keystrokes))))
 
 ;;; After the standard adopt-frame creates panes, size the top-level
 ;;; sheet to fill the terminal.
@@ -134,7 +128,7 @@
     ;; For non-interactor frames, inherit navigation commands (scroll,
     ;; focus cycling) as keystroke accelerators.  These conflict with
     ;; DREI in interactor apps, so they are only added here.
-    (let* ((has-interactor (climi::find-pane-of-type (frame-panes frame) 'interactor-pane))
+    (let* ((has-interactor (find-pane-of-type (frame-panes frame) 'interactor-pane))
            (app-table (frame-command-table frame))
            (current-parents (command-table-inherit-from app-table))
            (nav-table (find-command-table 'charmed-navigation-command-table)))
@@ -482,7 +476,9 @@ accumulating sheet-transformation offsets.  Stops at grafts."
               (if region
                   (max 0 (round (bounding-rectangle-max-y region)))
                   0))))
-    (error () 0)))
+    (error (c)
+      (charmed-backend-warn "pane-content-height" c)
+      0)))
 
 ;;; Scroll mode: :auto follows new output, :manual preserves user position.
 (defun pane-scroll-mode (port pane)
@@ -496,22 +492,24 @@ accumulating sheet-transformation offsets.  Stops at grafts."
 (defun scroll-pane (port pane delta)
   "Adjust PANE's scroll offset by DELTA rows. Clamps to valid range.
    Scrolling up (negative delta) switches to :manual mode.
-   Reaching max-scroll switches back to :auto mode."
+   Reaching max-scroll switches back to :auto mode.
+   Thread-safe: acquires state-lock since this is called from the I/O thread."
   (when pane
-    (let* ((current (pane-scroll-offset port pane))
-           (vh (pane-height pane))
-           (content-h (pane-content-height pane))
-           (max-scroll (max 0 (- content-h vh)))
-           (new-offset (max 0 (min max-scroll (+ current delta)))))
-      (unless (= current new-offset)
-        (setf (pane-scroll-offset port pane) new-offset)
-        (setf (pane-needs-redisplay pane) t)
-        ;; Any user-initiated scroll switches to :manual mode so
-        ;; redisplay-frame-panes :after won't override the position.
-        ;; Reaching max-scroll switches back to :auto.
-        (if (>= new-offset max-scroll)
-            (setf (pane-scroll-mode port pane) :auto)
-            (setf (pane-scroll-mode port pane) :manual))))))
+    (clim-sys:with-lock-held ((charmed-port-state-lock port))
+      (let* ((current (pane-scroll-offset port pane))
+             (vh (pane-height pane))
+             (content-h (pane-content-height pane))
+             (max-scroll (max 0 (- content-h vh)))
+             (new-offset (max 0 (min max-scroll (+ current delta)))))
+        (unless (= current new-offset)
+          (setf (pane-scroll-offset port pane) new-offset)
+          (setf (pane-needs-redisplay pane) t)
+          ;; Any user-initiated scroll switches to :manual mode so
+          ;; redisplay-frame-panes :after won't override the position.
+          ;; Reaching max-scroll switches back to :auto.
+          (if (>= new-offset max-scroll)
+              (setf (pane-scroll-mode port pane) :auto)
+              (setf (pane-scroll-mode port pane) :manual)))))))
 
 ;;; Compute pane viewport height for page scroll.
 ;;; Uses captured viewport geometry so it reflects layout allocation, not content size.
@@ -529,7 +527,9 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                   (max 1 (round (- (bounding-rectangle-max-y region)
                                    (bounding-rectangle-min-y region))))
                   10))))
-    (error () 10)))
+    (error (c)
+      (charmed-backend-warn "pane-height" c)
+      10)))
 
 ;;; Position the terminal's hardware cursor at the focused pane's text cursor.
 ;;; Called after redisplay, before port-force-output.
@@ -578,7 +578,9 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                           (charmed:screen-show-cursor screen nil)))
                     ;; No cursor or no viewport — hide
                     (charmed:screen-show-cursor screen nil)))
-            (error () (charmed:screen-show-cursor screen nil)))
+            (error (c)
+              (charmed-backend-warn "update-terminal-cursor" c)
+              (charmed:screen-show-cursor screen nil)))
           ;; No focused stream pane — hide cursor
           (charmed:screen-show-cursor screen nil)))))
 
@@ -637,20 +639,11 @@ accumulating sheet-transformation offsets.  Stops at grafts."
    redisplay on its next cycle."
   (let ((key-name (keyboard-event-key-name event))
         (sheet (port-keyboard-input-focus port)))
-    ;; Log arrow key events for debugging
-    (when (member key-name '(:up :down :tab))
-      (charmed-debug-log "INTERCEPT key=~S sheet=~S custom-tl=~S reading-cmd=~S"
-                         key-name sheet
-                         (charmed-port-custom-top-level-p port)
-                         (when sheet
-                           (let ((f (pane-frame sheet)))
-                             (when f (frame-reading-command-p f))))))
     ;; When the frame is reading a command, don't intercept navigation keys —
     ;; they need to reach the interactor's input buffer.
     (when sheet
       (let ((frame (pane-frame sheet)))
         (when (and frame (frame-reading-command-p frame))
-          (charmed-debug-log "INTERCEPT ~S → pass (reading-command)" key-name)
           (return-from charmed-intercept-key-event nil))
         ;; When the frame wants raw keys (e.g. browse mode), pass through
         (when (and frame (charmed-frame-wants-raw-keys-p frame))
@@ -660,7 +653,6 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     ;; path on the main thread.  Only intercept here when using the
     ;; custom charmed-frame-top-level.
     (unless (charmed-port-custom-top-level-p port)
-      (charmed-debug-log "INTERCEPT ~S → pass (not custom-tl)" key-name)
       (return-from charmed-intercept-key-event nil))
     (cond
       ;; Tab cycles focus
@@ -750,7 +742,8 @@ accumulating sheet-transformation offsets.  Stops at grafts."
           (%apply-pending-resize port)
           (capture-pane-viewport-sizes frame port)
           (pre-clear-dirty-panes frame port)))
-    (error () nil)))
+    (error (c)
+      (charmed-backend-warn "redisplay-frame-panes :before" c))))
 
 (defmethod redisplay-frame-panes :after
     ((frame application-frame) &key force-p)
@@ -773,8 +766,10 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                     (let ((max-scroll (- content-h vh))
                           (current (pane-scroll-offset port pane)))
                       (when (< current max-scroll)
-                        (setf (pane-scroll-offset port pane) max-scroll))))))
-            (error () nil))))
+                        (clim-sys:with-lock-held ((charmed-port-state-lock port))
+                          (setf (pane-scroll-offset port pane) max-scroll)))))))
+            (error (c)
+              (charmed-backend-warn "redisplay-frame-panes :after auto-scroll" c)))))
       (port-force-output port))))
 
 
@@ -826,6 +821,39 @@ accumulating sheet-transformation offsets.  Stops at grafts."
     `(,command-name ,@(nreverse collected))))
 
 
+;;; Terminal-friendly accepting-values implementation.
+;;; McCLIM's invoke-accepting-values creates an accept-values frame with
+;;; GUI Exit/Abort buttons.  In a terminal there are no clickable buttons,
+;;; so the dialog loops forever waiting for a click.  This override runs
+;;; the body continuation once on the stream, so accept calls prompt
+;;; sequentially on the interactor.  The body returns its final values.
+;;;
+;;; We save the original function and delegate to it for non-charmed ports.
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (unless (fboundp 'original-invoke-accepting-values)
+    (setf (fdefinition 'original-invoke-accepting-values)
+          (fdefinition 'climi::invoke-accepting-values))))
+
+(defun charmed-invoke-accepting-values (stream continuation &rest args
+                                        &key &allow-other-keys)
+  "Terminal-friendly accepting-values: run the body once, prompting sequentially."
+  (declare (ignore args))
+  (let* ((target (if (encapsulating-stream-p stream)
+                     (encapsulating-stream-stream stream)
+                     stream))
+         (port (handler-case (port target) (error () nil))))
+    (if (typep port 'charmed-port)
+        ;; Terminal mode: just call the body.  Each accept inside it
+        ;; will prompt the user sequentially on the stream.
+        (progn
+          (fresh-line target)
+          (funcall continuation target))
+        ;; Non-charmed port: use the original GUI implementation
+        (apply #'original-invoke-accepting-values stream continuation args))))
+
+(setf (fdefinition 'climi::invoke-accepting-values)
+      #'charmed-invoke-accepting-values)
+
 ;;; Prevent noise-strings from entering the DREI buffer on the charmed
 ;;; backend.  In GUI backends, noise-strings (e.g. "(package name)")
 ;;; display inline as a greyed-out hint.  In the terminal backend they
@@ -842,14 +870,100 @@ accumulating sheet-transformation offsets.  Stops at grafts."
       nil
       (call-next-method)))
 
+;;;============================================================================
+;;; TERMINAL-FRIENDLY NOTIFY-USER
+;;;============================================================================
+;;; McCLIM's default creates a GUI frame with push-button gadgets.
+;;; In the terminal we print the message on *query-io* and let the user
+;;; choose an exit box by number (or just press Enter for the default).
+
+(defmethod frame-manager-notify-user
+    ((fm charmed-frame-manager) message-string
+     &key frame associated-window title documentation
+          (exit-boxes '((:exit "OK")))
+          name style text-style)
+  (declare (ignore frame associated-window title documentation name style text-style))
+  (let ((stream *query-io*))
+    (fresh-line stream)
+    (format stream "~%--- ~A ---~%" (or message-string "Notification"))
+    (if (= (length exit-boxes) 1)
+        ;; Single exit box: just press Enter
+        (progn
+          (format stream "[Press Enter] ~A~%" (second (first exit-boxes)))
+          (finish-output stream)
+          (read-line stream nil)
+          (first (first exit-boxes)))
+        ;; Multiple exit boxes: number them and let the user choose
+        (progn
+          (loop for box in exit-boxes
+                for i from 1
+                do (format stream "  ~D) ~A~%" i (second box)))
+          (format stream "Choice [1]: ")
+          (finish-output stream)
+          (let* ((input (string-trim '(#\Space #\Tab #\Newline)
+                                     (or (read-line stream nil) "")))
+                 (n (if (string= input "")
+                        1
+                        (or (parse-integer input :junk-allowed t) 1)))
+                 (idx (max 0 (min (1- (length exit-boxes)) (1- n)))))
+            (first (nth idx exit-boxes)))))))
+
+;;;============================================================================
+;;; TERMINAL-FRIENDLY MENU-CHOOSE
+;;;============================================================================
+;;; McCLIM's default creates a popup menu window with mouse interaction.
+;;; In the terminal we print numbered items and let the user type a choice.
+
+(defmethod frame-manager-menu-choose
+    ((fm charmed-frame-manager) items
+     &key associated-window printer presentation-type
+          (default-item nil default-item-p)
+          text-style label cache unique-id id-test cache-value cache-test
+          max-width max-height n-rows n-columns x-spacing y-spacing row-wise
+          cell-align-x cell-align-y scroll-bars pointer-documentation)
+  (declare (ignore associated-window printer presentation-type text-style
+                   cache unique-id id-test cache-value cache-test
+                   max-width max-height n-rows n-columns x-spacing y-spacing
+                   row-wise cell-align-x cell-align-y scroll-bars
+                   pointer-documentation))
+  (let ((stream *query-io*))
+    (fresh-line stream)
+    (when label
+      (format stream "~%--- ~A ---~%" label))
+    (loop for item in items
+          for i from 1
+          for display = (climi::menu-item-display item)
+          for value = (climi::menu-item-value item)
+          do (let ((marker (if (and default-item-p (eql value default-item))
+                               "*" " ")))
+               (format stream "~A ~D) ~A~%" marker i display)))
+    (format stream "Choice~@[ [~A]~]: "
+            (when default-item-p
+              (let ((pos (position default-item items
+                                  :key #'climi::menu-item-value)))
+                (when pos (1+ pos)))))
+    (finish-output stream)
+    (let* ((input (string-trim '(#\Space #\Tab #\Newline)
+                               (or (read-line stream nil) "")))
+           (n (cond
+                ((string= input "")
+                 (if default-item-p
+                     (1+ (or (position default-item items
+                                       :key #'climi::menu-item-value)
+                             0))
+                     1))
+                (t (or (parse-integer input :junk-allowed t) 1))))
+           (idx (max 0 (min (1- (length items)) (1- n))))
+           (chosen (nth idx items)))
+      (values (climi::menu-item-value chosen) chosen nil))))
+
 ;;; Scale pixel-sized space requirements to terminal-appropriate sizes.
 ;;; GUI applications request dimensions like :height 500 (pixels), but in
 ;;; a terminal each unit = 1 character cell.  Without clamping, a 500-row
 ;;; main pane pushes the interactor off the 51-row terminal screen.
-;;; Only activates when the primary method returns space requirements
-;;; that exceed twice the terminal height — this avoids interfering
-;;; with apps that already specify correct terminal-scale ratios
-;;; (e.g. playlisp's 9/20 + 3/20 + 2/5 layout).
+;;; Activates when the primary method returns space requirements that exceed
+;;; the terminal height.  Ratio-based layouts (e.g. playlisp's 9/20 + 3/20
+;;; + 2/5) produce values ≤ th and pass through unclamped.
 (defmethod compose-space :around ((pane clim-stream-pane) &key width height)
   (let ((port (port pane)))
     (if (typep port 'charmed-port)
@@ -857,7 +971,7 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                (tw (first size))
                (th (second size))
                (sr (call-next-method)))
-          (if (> (space-requirement-height sr) (* 2 th))
+          (if (> (space-requirement-height sr) th)
               (let* ((interactor-reserve (max 5 (floor th 6)))
                      (max-h (if (typep pane 'interactor-pane)
                                 interactor-reserve

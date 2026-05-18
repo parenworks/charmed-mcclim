@@ -37,13 +37,13 @@ run on charmed (terminal), CLX (X11), etc.
 
 ## Remaining Work ❌
 
-- **test-multi-pane `run-standard`** — tested, works
-- **test-interactor `run-standard`** — tested, works
+- ~~**test-multi-pane `run-standard`**~~ — ✅ tested, works
+- ~~**test-interactor `run-standard`**~~ — ✅ tested, works
 - **Scrolling performance** — slightly sluggish with 100+ lines of content;
   visible-band replay helps but could be optimized further
-- **Clean up `debug-hello.lisp`** — debug script, can be deleted
-- **Remove I/O thread debug logging** — `charmed-debug-log` calls in
-  `distribute-event :around` and `charmed-intercept-key-event`
+- ~~**Clean up `debug-hello.lisp`**~~ — ✅ removed
+- ~~**Remove I/O thread debug logging**~~ — ✅ `charmed-debug-log` and
+  `*charmed-debug-stream*` removed from `frame-manager.lisp` and `port.lisp`
 
 **Key code locations:**
 
@@ -110,6 +110,7 @@ cd ~/SourceCode/charmed-mcclim && sbcl --eval '(ql:quickload :mcclim :silent t)'
 
 ## Next Steps
 
-1. **Test multi-pane and interactor apps** with `run-standard`.
-2. **Clean up debug artifacts** — remove `debug-hello.lisp` and debug logging.
+1. ~~**Test multi-pane and interactor apps**~~ — ✅ Done.
+2. ~~**Clean up debug artifacts**~~ — ✅ Done.
 3. **Performance investigation** — profile scrolling with large content.
+4. **See `CLIM-2.0-GAPS.md`** for the full gap analysis and remaining priorities.

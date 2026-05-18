@@ -33,7 +33,10 @@
                        :documentation "T when charmed-frame-top-level is running. Controls whether Tab cycles focus (custom) or passes through to DREI completion (default-frame-top-level).")
    (resize-pending :initform nil
                    :accessor charmed-port-resize-pending
-                   :documentation "Set to (width . height) by the I/O thread when a terminal resize is detected. The main thread reads and clears it during redisplay."))
+                   :documentation "Set to (width . height) by the I/O thread when a terminal resize is detected. The main thread reads and clears it during redisplay.")
+   (state-lock :initform (clim-sys:make-lock)
+               :reader charmed-port-state-lock
+               :documentation "Lock protecting shared mutable state accessed by both the I/O thread and the main thread: resize-pending, scroll-offsets, scroll-modes, and pane-needs-redisplay."))
 
   (:default-initargs :pointer (make-instance 'standard-pointer)))
 
@@ -113,16 +116,19 @@
         ;; Resize the charmed screen buffer (no screen output)
         (when screen
           (charmed:screen-resize screen width height))
-        ;; Store pending resize for the main thread
-        (setf (charmed-port-resize-pending port) (cons width height)))
+        ;; Store pending resize for the main thread (thread-safe)
+        (clim-sys:with-lock-held ((charmed-port-state-lock port))
+          (setf (charmed-port-resize-pending port) (cons width height))))
       t)))
 
 (defun %apply-pending-resize (port)
   "Main thread: if a resize is pending, relayout all frames and redisplay.
    Returns T if resize was applied, NIL otherwise."
-  (let ((pending (charmed-port-resize-pending port)))
+  (let ((pending (clim-sys:with-lock-held ((charmed-port-state-lock port))
+                  (let ((p (charmed-port-resize-pending port)))
+                    (setf (charmed-port-resize-pending port) nil)
+                    p))))
     (when pending
-      (setf (charmed-port-resize-pending port) nil)
       (let ((width (car pending))
             (height (cdr pending)))
         (let ((fm (first (port-frame-managers port))))
@@ -500,12 +506,7 @@ first frame's top-level-sheet, or the graft."
               ;; In charmed-frame-top-level, events go to focused pane as before.
               (let ((target (if (charmed-port-custom-top-level-p port)
                                 focused
-                                (or (climi::frame-standard-input frame) focused))))
-                (when (member (keyboard-event-key-name event) '(:up :down :tab))
-                  (clim-charmed::charmed-debug-log
-                   "DISPATCH ~S → target=~S focused=~S"
-                   (keyboard-event-key-name event)
-                   target focused))
+                                (or (frame-standard-input frame) focused))))
                 (dispatch-event target event))))))
     (return-from distribute-event))
   ;; For pointer events, bypass the mirror-based sheet traversal.

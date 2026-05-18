@@ -164,6 +164,24 @@
   "Convert a CLIM ink to a charmed background color."
   (color-to-charmed (resolve-ink ink)))
 
+;;; Dynamic screen buffer growth
+;;; The screen buffer is initially sized in note-frame-enabled to cover
+;;; the full laid-out sheet tree.  Content added later (e.g. streaming
+;;; output in an interactor) may extend beyond the initial buffer.
+;;; This function grows the buffer on demand to avoid silent clipping.
+
+(defun ensure-screen-capacity (screen col row)
+  "Grow the screen buffer if (COL, ROW) is outside current dimensions.
+   Growth is amortized by adding 25% headroom."
+  (let ((need-w (1+ col))
+        (need-h (1+ row))
+        (cur-w (charmed:screen-width screen))
+        (cur-h (charmed:screen-height screen)))
+    (when (or (> need-w cur-w) (> need-h cur-h))
+      (charmed:screen-resize screen
+                             (max cur-w (ceiling (* need-w 5/4)))
+                             (max cur-h (ceiling (* need-h 5/4)))))))
+
 ;;; Coordinate transformation - sheet space to screen (mirror) space
 
 (defun pane-scroll-offset (port pane)
@@ -335,6 +353,8 @@
            (port (port sheet))
            (len (length text))
            (style (text-style-to-charmed-style medium)))
+      ;; Grow screen buffer if this text would land beyond current bounds
+      (ensure-screen-capacity screen (+ col len) row)
       (with-clipping (medium col row :width len)
         (let ((clipped-text (if (= len (length text))
                                 text
@@ -418,7 +438,12 @@
               (flet ((in-bounds-p (c r)
                        (or (null min-col)
                            (and (>= r min-row) (< r max-row)
-                                (>= c min-col) (< c max-col)))))
+                                (>= c min-col) (< c max-col))))
+                     (set-cell (c r ch)
+                       (if fg
+                           (charmed:screen-set-cell screen c r ch
+                                                    :style (charmed:make-style :fg fg))
+                           (charmed:screen-set-cell screen c r ch))))
                 (cond
                   ;; Horizontal line
                   ((= row1 row2)
@@ -426,20 +451,36 @@
                          (c2 (max col1 col2)))
                      (loop for c from c1 to c2
                            when (in-bounds-p c row1)
-                           do (if fg
-                                  (charmed:screen-set-cell screen c row1 #\─
-                                                           :style (charmed:make-style :fg fg))
-                                  (charmed:screen-set-cell screen c row1 #\─)))))
+                           do (set-cell c row1 #\─))))
                   ;; Vertical line
                   ((= col1 col2)
                    (let ((r1 (min row1 row2))
                          (r2 (max row1 row2)))
                      (loop for r from r1 to r2
                            when (in-bounds-p col1 r)
-                           do (if fg
-                                  (charmed:screen-set-cell screen col1 r #\│
-                                                           :style (charmed:make-style :fg fg))
-                                  (charmed:screen-set-cell screen col1 r #\│))))))))))))))
+                           do (set-cell col1 r #\│))))
+                  ;; Diagonal line — Bresenham's algorithm
+                  (t
+                   (let* ((dc (abs (- col2 col1)))
+                          (dr (abs (- row2 row1)))
+                          (step-c (if (< col1 col2) 1 -1))
+                          (step-r (if (< row1 row2) 1 -1))
+                          (err (- dc dr))
+                          (c col1) (r row1)
+                          ;; Choose glyph based on slope direction
+                          (ch (if (eql (> col2 col1) (> row2 row1))
+                                  #\\ #\/)))
+                     (loop
+                       (when (in-bounds-p c r)
+                         (set-cell c r ch))
+                       (when (and (= c col2) (= r row2)) (return))
+                       (let ((e2 (* 2 err)))
+                         (when (> e2 (- dr))
+                           (decf err dr)
+                           (incf c step-c))
+                         (when (< e2 dc)
+                           (incf err dc)
+                           (incf r step-r)))))))))))))))
 
 (defmethod medium-draw-lines* ((medium charmed-medium) coord-seq)
   (let ((tr (invert-transformation (medium-transformation medium))))
@@ -465,17 +506,30 @@
       ;; These are full-screen background clears that would wipe child pane content.
       (when (and filled (not (typep sheet 'clim-stream-pane)))
         (return-from medium-draw-rectangle*))
-      ;; For focused interactor, skip large filled rects (pane clears) but allow
-      ;; small rects for character-level clearing during editing
-      (let ((port (port sheet)))
-        (when (and filled
-                   port
-                   (typep port 'charmed-port)
-                   (typep sheet 'interactor-pane)
-                   (eq sheet (port-keyboard-input-focus port))
-                   ;; Skip if height > 2 lines (likely full pane clear, not char clear)
-                   (> (- bottom top) 2))
-          (return-from medium-draw-rectangle*)))
+      ;; Skip full-pane background clears on stream panes.  McCLIM redraws
+      ;; pane backgrounds with a filled rect covering the entire sheet region
+      ;; before replaying output records.  In the terminal this wipes visible
+      ;; content that may not be immediately redrawn (e.g. focused interactor
+      ;; with DREI content).  We detect these by comparing the rect area to
+      ;; the sheet region — if the rect covers ≥90% of the pane and uses
+      ;; the background ink, skip it.
+      (when filled
+        (handler-case
+            (let* ((region (sheet-region sheet))
+                   (rw (bounding-rectangle-width region))
+                   (rh (bounding-rectangle-height region))
+                   (rect-w (abs (- right left)))
+                   (rect-h (abs (- bottom top)))
+                   (ink (medium-ink medium))
+                   (bg (pane-background sheet)))
+              (when (and (> rw 0) (> rh 0)
+                         (>= rect-w (* 0.9 rw))
+                         (>= rect-h (* 0.9 rh))
+                         (or (eq ink bg)
+                             (eq ink +background-ink+)
+                             (eq ink +white+)))
+                (return-from medium-draw-rectangle*)))
+          (error () nil)))
       (multiple-value-bind (sl st) (sheet-to-screen medium left top)
         (multiple-value-bind (sr sb) (sheet-to-screen medium right bottom)
           (let* ((c1 (round sl))  (r1 (round st))
@@ -535,12 +589,48 @@
                                  radius-1-dx radius-1-dy
                                  radius-2-dx radius-2-dy
                                  start-angle end-angle filled)
-  (declare (ignore center-x center-y
-                   radius-1-dx radius-1-dy
-                   radius-2-dx radius-2-dy
-                   start-angle end-angle filled))
-  ;; Ellipse rendering in a terminal is not practical
-  nil)
+  (declare (ignore start-angle end-angle))
+  ;; Approximate axis-aligned ellipses/circles in the terminal.
+  ;; Extract radii from the two radius vectors.
+  (let ((screen (medium-screen medium))
+        (rx (max (abs radius-1-dx) (abs radius-2-dx)))
+        (ry (max (abs radius-1-dy) (abs radius-2-dy))))
+    (when (and screen (> rx 0) (> ry 0))
+      (multiple-value-bind (cx cy) (sheet-to-screen medium center-x center-y)
+        (let ((icx (round cx)) (icy (round cy))
+              (irx (round rx)) (iry (round ry))
+              (ink (medium-ink medium))
+              (fg nil))
+          (setf fg (ink-to-charmed-fg ink))
+          (multiple-value-bind (min-col min-row max-col max-row)
+              (pane-screen-bounds medium)
+            (flet ((in-bounds-p (c r)
+                     (or (null min-col)
+                         (and (>= r min-row) (< r max-row)
+                              (>= c min-col) (< c max-col))))
+                   (set-cell (c r ch)
+                     (if fg
+                         (charmed:screen-set-cell screen c r ch
+                                                  :style (charmed:make-style :fg fg))
+                         (charmed:screen-set-cell screen c r ch))))
+              (if filled
+                  ;; Filled: draw horizontal spans at each row
+                  (loop for dy from (- iry) to iry
+                        for r = (+ icy dy)
+                        for frac = (if (zerop iry) 1.0 (sqrt (max 0.0 (- 1.0 (expt (/ dy iry) 2)))))
+                        for half-w = (round (* frac irx))
+                        do (loop for dc from (- half-w) to half-w
+                                 for c = (+ icx dc)
+                                 when (in-bounds-p c r)
+                                 do (set-cell c r #\█)))
+                  ;; Outline: sample points around the ellipse perimeter
+                  (let ((steps (max 16 (* 4 (+ irx iry)))))
+                    (loop for i from 0 below steps
+                          for angle = (* 2 pi (/ i steps))
+                          for c = (round (+ icx (* irx (cos angle))))
+                          for r = (round (+ icy (* iry (sin angle))))
+                          when (in-bounds-p c r)
+                          do (set-cell c r #\·)))))))))))
 
 ;;; Pixmap support (minimal)
 
@@ -594,6 +684,9 @@
 
 (defmethod medium-miter-limit ((medium charmed-medium))
   0)
+
+(defmethod medium-buffering-output-p ((medium charmed-medium))
+  t)
 
 ;;; Text style setters (no-op for terminal)
 
