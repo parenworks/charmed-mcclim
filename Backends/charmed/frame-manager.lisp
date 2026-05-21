@@ -927,6 +927,20 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                                 (return-from got-command))))))
                       (setf command (read-frame-command frame :stream *standard-input*))))
                   (%diag "GOT-COMMAND ~S" command)
+                  ;; Clear the interactor after read-frame-command returns.
+                  ;; DREI's output record replay accumulates X offsets,
+                  ;; leaving the command echo at the wrong position.
+                  ;; Clear both the screen buffer AND the output record
+                  ;; history so nothing can replay the ghost text.
+                  (when (and command interactor)
+                    (let ((vp (gethash interactor
+                                       (charmed-port-viewport-sizes port))))
+                      (when vp
+                        (charmed:screen-fill-rect
+                         (charmed-port-screen port)
+                         (round (first vp)) (round (second vp))
+                         (round (third vp)) (round (fourth vp)))))
+                    (window-clear interactor))
                   (when command
                     (execute-frame-command frame command))
                   ;; Redisplay after command execution — skip when in raw-key

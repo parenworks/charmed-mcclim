@@ -349,18 +349,24 @@
               (charmed:screen-write-string screen col row clipped-text
                                            :style style)
               (charmed:screen-write-string screen col row clipped-text))
+          ;; After writing text to the interactor pane, clear from
+          ;; text-end to the right edge of the viewport.  DREI replays
+          ;; output records with accumulating X offsets on each keystroke,
+          ;; leaving ghost text to the right of the current draw.
+          (when (and port (typep sheet 'interactor-pane))
+            (let ((vp (gethash sheet (charmed-port-viewport-sizes port))))
+              (when vp
+                (let* ((text-end (+ col (length clipped-text)))
+                       (vp-right (+ (round (first vp)) (round (third vp))))
+                       (clear-width (- vp-right text-end)))
+                  (when (plusp clear-width)
+                    (charmed:screen-fill-rect screen
+                                              text-end row
+                                              clear-width 1))))))
           ;; Track end-of-text for cursor positioning during input editing.
           (when (and port (plusp (length clipped-text)))
             (setf (gethash sheet (charmed-port-last-draw-end port))
-                  (cons (+ col (length clipped-text)) row))
-            ;; Flush immediately when DREI is editing so each keystroke
-            ;; echo is visible without waiting for the next event cycle.
-            ;; This is the primary path for character echo — display-drei
-            ;; may not fire for every keystroke in default-frame-top-level.
-            (let ((frame (pane-frame sheet)))
-              (when (and frame (frame-reading-command-p frame))
-                (update-terminal-cursor port)
-                (charmed-throttled-present port screen :force t)))))))))
+                  (cons (+ col (length clipped-text)) row))))))))
 
 (defvar *draw-text-count* 0)
 
