@@ -106,6 +106,17 @@
 (defmethod adopt-frame :before
     ((fm charmed-frame-manager) (frame application-frame))
   (suppress-frame-gui-elements frame)
+  ;; Replace concurrent-queue with simple-queue for terminal event pumping.
+  ;; simple-queue calls process-next-event to poll terminal input;
+  ;; concurrent-queue blocks on a condition variable and deadlocks
+  ;; in the single-threaded terminal event loop.
+  (let ((port (port fm)))
+    (when (frame-event-queue frame)
+      (setf (frame-event-queue frame)
+            (ensure-simple-queue (frame-event-queue frame) port)))
+    (when (frame-input-buffer frame)
+      (setf (frame-input-buffer frame)
+            (ensure-simple-queue (frame-input-buffer frame) port))))
   ;; Auto-inherit charmed quit command so Ctrl-Q always works.
   (let* ((app-table (frame-command-table frame))
          (current-parents (command-table-inherit-from app-table))
@@ -151,14 +162,17 @@
          (when (and (spacing-pane-p sheet)
                     (> (spacing-pane-border-width sheet) 1))
            (setf (spacing-pane-border-width sheet) 1))
-         ;; Wire queue-port on sheet event queues for port-force-output.
-         ;; concurrent-queue inherits queue-port from simple-queue.
-         ;; The I/O thread signals condition variables via queue-append;
-         ;; queue-port is used by do-port-force-output to flush the screen.
+         ;; Replace concurrent-queue with simple-queue on all sheet
+         ;; event queues.  simple-queue calls process-next-event to pump
+         ;; terminal input; concurrent-queue deadlocks without an I/O thread.
          (when (standard-sheet-input-mixin-p sheet)
            (let ((q (sheet-event-queue sheet)))
-             (when (and q (null (queue-port q)))
-               (setf (queue-port q) port)))))
+             (when q
+               (cond ((concurrent-queue-p q)
+                      (set-sheet-event-queue sheet (make-simple-queue port)))
+                     ((simple-queue-p q)
+                      (when (null (queue-port q))
+                        (setf (queue-port q) port))))))))
        tls))))
 
 ;;; After the frame is enabled and the top-level sheet made visible,
@@ -224,18 +238,30 @@
       ;; adoption and enabling degrafts and re-grafts sheets, which
       ;; replaces our charmed-medium with basic-medium.
       (when port
-        (map-over-sheets
-         (lambda (sheet)
-           (when (and (typep sheet 'sheet-with-medium-mixin)
-                      (sheet-medium sheet)
-                      (not (typep (sheet-medium sheet) 'charmed-medium)))
-             (let ((old-medium (sheet-medium sheet))
-                   (new-medium (make-medium port sheet)))
-               (degraft-medium old-medium port sheet)
-               (deallocate-medium port old-medium)
-               (setf (sheet-medium-internal sheet) new-medium)
-               (engraft-medium new-medium port sheet))))
-         tls))
+        (let ((replaced 0) (skipped 0) (errored 0))
+          (map-over-sheets
+           (lambda (sheet)
+             (handler-case
+                 (when (typep sheet 'sheet-with-medium-mixin)
+                   (let ((m (sheet-medium sheet)))
+                     (cond
+                       ((null m)
+                        (incf skipped))
+                       ((typep m 'charmed-medium)
+                        (incf skipped))
+                       (t
+                        (let ((new-medium (make-medium port sheet)))
+                          (degraft-medium m port sheet)
+                          (deallocate-medium port m)
+                          (setf (slot-value sheet 'climi::medium) new-medium)
+                          (engraft-medium new-medium port sheet)
+                          (incf replaced))))))
+               (error (c)
+                 (incf errored)
+                 (%diag "MEDIUM-FIX ERROR on ~S: ~A"
+                        (if (typep sheet 'pane) (pane-name sheet) sheet) c))))
+           tls)
+          (%diag "MEDIUM-FIX: replaced=~D skipped=~D errored=~D" replaced skipped errored)))
       ;; Initialize keyboard focus
       (when (and port (null (port-keyboard-input-focus port)))
         (let* ((panes (collect-frame-panes frame))
@@ -243,7 +269,11 @@
                                     panes)))
           (when panes
             (setf (port-keyboard-input-focus port)
-                  (or interactor (first panes)))))))))
+                  (or interactor (first panes))))))
+      ;; Initial redisplay + flush so panes are drawn before
+      ;; default-frame-top-level blocks in read-frame-command.
+      (redisplay-frame-panes frame :force-p t)
+      (port-force-output port))))
 
 ;;; Draw separator lines between sibling panes (horizontal and vertical splits).
 (defun sheet-screen-position-xy (sheet)
@@ -584,6 +614,75 @@ accumulating sheet-transformation offsets.  Stops at grafts."
           ;; No focused stream pane — hide cursor
           (charmed:screen-show-cursor screen nil)))))
 
+;;; ── Terminal Line Input ──────────────────────────────────────────────
+;;; Simple line reader that bypasses DREI entirely.  Reads key events
+;;; directly from process-next-event, handles printable chars, backspace,
+;;; and Enter/Return.  Echoes to the CLIM stream and forces output after
+;;; each keystroke so the user sees immediate feedback.
+;;; Returns the entered string, or NIL on Escape.
+(defun charmed-read-line (port stream &key (prompt nil))
+  "Read a line of text from the terminal, bypassing DREI.
+   PORT is the charmed-port, STREAM is the CLIM stream to echo on.
+   PROMPT, if provided, is written before reading."
+  (%diag "CHARMED-READ-LINE enter prompt=~S stream=~S" prompt stream)
+  (when prompt
+    (fresh-line stream)
+    (write-string prompt stream)
+    (finish-output stream)
+    (%diag "CHARMED-READ-LINE prompt written"))
+  ;; Force initial display so prompt is visible
+  (let ((frame (pane-frame stream)))
+    (%diag "CHARMED-READ-LINE frame=~S" frame)
+    (when frame
+      (handler-case
+          (progn (redisplay-frame-panes frame)
+                 (port-force-output port)
+                 (%diag "CHARMED-READ-LINE redisplay+output done"))
+        (error (c) (%diag "CHARMED-READ-LINE redisplay ERROR: ~A" c)))))
+  (let ((buf (make-array 0 :element-type 'character :adjustable t :fill-pointer 0)))
+    (loop
+      (process-next-event port :timeout nil)
+      ;; Check focused pane's queue for key events
+      (let ((focused (port-keyboard-input-focus port)))
+        (when focused
+          (let ((event (event-read-no-hang focused)))
+            (when (typep event 'key-press-event)
+              (let ((key-name (keyboard-event-key-name event))
+                    (char (keyboard-event-character event)))
+                (cond
+                  ;; Enter/Return — done
+                  ((or (eql key-name :newline) (eql key-name :return))
+                   (terpri stream)
+                   (finish-output stream)
+                   (return (coerce buf 'string)))
+                  ;; Escape — cancel
+                  ((eql key-name :escape)
+                   (terpri stream)
+                   (finish-output stream)
+                   (return nil))
+                  ;; Backspace — delete last char
+                  ((eql key-name :backspace)
+                   (when (> (fill-pointer buf) 0)
+                     (decf (fill-pointer buf))
+                     ;; Erase on screen using the back buffer cursor
+                     (let ((screen (charmed-port-screen port)))
+                       (when screen
+                         (let* ((back (charmed::screen-back screen))
+                                (col (charmed::buffer-cursor-x back))
+                                (row (charmed::buffer-cursor-y back)))
+                           (when (> col 1)
+                             (charmed:screen-set-cursor screen (1- col) row)
+                             (charmed:screen-set-cell screen (1- col) row #\Space)
+                             (charmed:screen-set-cursor screen (1- col) row)))))))
+                  ;; Printable character
+                  ((and char (graphic-char-p char))
+                   (vector-push-extend char buf)
+                   (write-char char stream)
+                   (finish-output stream)))))
+          ;; Force output so each keystroke is visible
+          (handler-case (port-force-output port)
+            (error () nil))))))))
+
 ;;; Custom frame top-level for charmed.
 ;;; Use as :top-level (charmed-frame-top-level) in define-application-frame.
 ;;; This runs inside run-frame-top-level :around which handles frame-exit.
@@ -679,54 +778,164 @@ accumulating sheet-transformation offsets.  Stops at grafts."
       ;; Everything else passes through
       (t nil))))
 
-(defun charmed-frame-top-level (frame &key &allow-other-keys)
+(defun %diag (fmt &rest args)
+  "Write a diagnostic line to /tmp/charmed-diag.log."
+  (with-open-file (s "/tmp/charmed-diag.log"
+                     :direction :output
+                     :if-exists :append
+                     :if-does-not-exist :create)
+    (format s "~A ~?~%" (get-internal-real-time) fmt args)
+    (finish-output s)))
+
+(defun charmed-frame-top-level (frame &key (prompt nil) &allow-other-keys)
   "Top-level loop for frames on the charmed terminal backend.
-   The port's I/O thread reads terminal input and distributes events to
-   sheet event queues.  Terminal-specific keys (scroll, Tab focus) are
-   intercepted in distribute-event :around before reaching queues.
-   Ctrl-Q is handled here on the main thread (frame-exit must run on
-   the main thread to be caught by run-frame-top-level's handler-case).
-   This loop reads queued events and dispatches them to the frame."
+   Uses the standard CLIM command loop (read-frame-command / execute)
+   with the interactor's simple-queue pumping terminal input via
+   process-next-event.  PROMPT, if supplied, is a function of (stream frame)
+   called before each command read to display the prompt."
   (let* ((fm (frame-manager frame))
          (port (port fm)))
     ;; Signal that the custom top-level is active — Tab cycles focus
     ;; (in default-frame-top-level, Tab passes through to DREI completion)
     (setf (charmed-port-custom-top-level-p port) t)
-    ;; Set initial focus to the first named pane
-    (let ((panes (collect-frame-panes frame)))
-      (when panes
-        (setf (port-keyboard-input-focus port) (first panes))))
+    ;; Set initial focus to the interactor pane (for command input)
+    (let* ((panes (collect-frame-panes frame))
+           (interactor (find-if (lambda (p) (typep p 'interactor-pane)) panes)))
+      (when (or interactor panes)
+        (setf (port-keyboard-input-focus port) (or interactor (first panes))))
+      (%diag "INIT panes=~S focus=~S" (mapcar #'pane-name panes)
+             (pane-name (port-keyboard-input-focus port))))
+    ;; Diagnostic: log queue types on the first pane
+    (let* ((first-pane (first (collect-frame-panes frame)))
+           (q (sheet-event-queue first-pane)))
+      (%diag "FIRST-PANE ~S queue-type=~S queue-port=~S"
+             (pane-name first-pane) (type-of q) (queue-port q)))
+    ;; Fix medium types on the actual content panes.  note-frame-enabled
+    ;; replaces mediums on the sheet tree, but something during frame
+    ;; enabling re-installs basic-medium on the content panes.
+    (dolist (pane (collect-frame-panes frame))
+      (handler-case
+          (when (and (typep pane 'sheet-with-medium-mixin)
+                     (sheet-medium pane)
+                     (not (typep (sheet-medium pane) 'charmed-medium)))
+            (let ((old (sheet-medium pane))
+                  (new (make-medium port pane)))
+              ;; Only degraft if the old medium has a port (is still engrafted)
+              (when (port old)
+                (degraft-medium old port pane)
+                (deallocate-medium port old))
+              (setf (slot-value pane 'climi::medium) new)
+              (engraft-medium new port pane)
+              (%diag "TOP-LEVEL MEDIUM-FIX ~S: ~S -> ~S"
+                     (pane-name pane) (type-of old) (type-of new))))
+        (error (c)
+          (%diag "TOP-LEVEL MEDIUM-FIX ERROR ~S: ~A" (pane-name pane) c))))
     ;; Initial display (pre-clear and viewport capture happen in :before method)
-    (redisplay-frame-panes frame :force-p t)
-    (port-force-output port)
-    ;; Event loop — read events from the frame's event queue (populated by
-    ;; the I/O thread) and dispatch them.  Use read-no-hang + sleep to avoid
-    ;; blocking forever, allowing periodic redisplay for scroll/focus changes
-    ;; that the I/O thread applied without triggering screen writes.
-    (loop
-        ;; Drain queued events, but only when NOT reading a command.
-        ;; During accept/read-gesture, events must stay in the queue for DREI.
-        (unless (frame-reading-command-p frame)
-          (loop for event = (event-read-no-hang (first (collect-frame-panes frame)))
-                while event
-                do (cond
-                     ;; Ctrl-Q: quit (runs on main thread, so frame-exit works)
-                     ((and (typep event 'key-press-event)
-                           (eql (keyboard-event-key-name event) :|Q|)
-                           (not (zerop (logand (event-modifier-state event)
-                                               +control-key+))))
-                      (frame-exit frame))
-                     ((typep event 'key-press-event)
-                      (charmed-handle-key-event frame event
-                                                (port-keyboard-input-focus port)))
-                     (t
-                      (handle-event (event-sheet event) event)))))
-        ;; Redisplay (pre-clear and viewport capture happen in :before method)
-        (redisplay-frame-panes frame)
-        (port-force-output port)
-        ;; Brief sleep to avoid busy-waiting — the I/O thread pushes events
-        ;; at terminal input rate.
-        (sleep 0.02))))
+    (handler-case
+        (progn
+          (redisplay-frame-panes frame :force-p t)
+          (%diag "INITIAL-REDISPLAY ok"))
+      (error (c) (%diag "INITIAL-REDISPLAY ERROR: ~A" c)))
+    (handler-case
+        (progn
+          (port-force-output port)
+          (%diag "INITIAL-FORCE-OUTPUT ok"))
+      (error (c) (%diag "INITIAL-FORCE-OUTPUT ERROR: ~A" c)))
+    ;; Diagnostic: check screen buffer content and pane positions
+    (let ((screen (charmed-port-screen port)))
+      (when screen
+        (let* ((back (charmed:screen-back screen))
+               (cells (charmed::buffer-cells back))
+               (non-empty 0)
+               (sample nil))
+          (dotimes (row (min 5 (charmed:screen-height screen)))
+            (dotimes (col (min 80 (charmed:screen-width screen)))
+              (let ((ch (charmed:cell-char (aref cells row col))))
+                (when (and ch (not (eql ch #\Space)) (not (eql ch #\Nul)))
+                  (incf non-empty)
+                  (when (< (length sample) 10)
+                    (push (cons (list col row) ch) sample))))))
+          (%diag "SCREEN-CHECK: non-empty=~D sample=~S" non-empty (nreverse sample)))))
+    ;; Diagnostic: check pane positions and medium types
+    (dolist (pane (collect-frame-panes frame))
+      (handler-case
+          (let ((tr (sheet-transformation pane)))
+            (multiple-value-bind (x y) (transform-position tr 0 0)
+              (let ((w (bounding-rectangle-width (sheet-region pane)))
+                    (h (bounding-rectangle-height (sheet-region pane)))
+                    (slot-med (slot-value pane 'climi::medium))
+                    (gf-med (sheet-medium pane)))
+                (%diag "PANE ~S pos=(~D,~D) size=(~Dx~D) slot=~S gf=~S recording=~S"
+                       (pane-name pane) (round x) (round y)
+                       (round w) (round h)
+                       (type-of slot-med) (type-of gf-med)
+                       (stream-recording-p pane)))))
+        (error (c)
+          (%diag "PANE ~S ERROR: ~A" (pane-name pane) c))))
+    (%diag "ENTER-LOOP")
+    ;; Standard CLIM command loop — read-frame-command blocks on the
+    ;; interactor's simple-queue which calls process-next-event to pump
+    ;; terminal input.  Keystroke accelerators are matched by the command
+    ;; system automatically.
+    ;; NOTE: frame-standard-input / frame-standard-output BLOCK on charmed,
+    ;; so we bypass them and use the interactor pane directly.
+    (let* ((interactor (find-if (lambda (p) (typep p 'interactor-pane))
+                                (collect-frame-panes frame)))
+           (stream     (or interactor (first (collect-frame-panes frame))))
+           (*standard-input*  stream)
+           (*standard-output* stream)
+           (*query-io*        stream))
+      (%diag "CMD-LOOP interactor=~S stream=~S" interactor stream)
+      (let ((from-accelerator nil))
+        (loop
+          (restart-case
+              (progn
+                ;; Prompt — skip after accelerator commands (Ctrl-N/P etc)
+                (when (and interactor (not from-accelerator))
+                  (fresh-line interactor)
+                  (if prompt
+                      (funcall prompt interactor frame)
+                      (write-string "=> " interactor))
+                  (finish-output interactor))
+                (setf from-accelerator nil)
+                ;; Redisplay before reading (shows prompt + updated panes)
+                (handler-case
+                    (progn
+                      (redisplay-frame-panes frame)
+                      (port-force-output port))
+                  (error (c) (%diag "PRE-READ REDISPLAY ERROR: ~A" c)))
+                ;; Read and execute command
+                ;; Use handler-bind so we can DECLINE for non-command gestures
+                ;; (like Enter/Newline) letting DREI handle them normally.
+                ;; When signal returns without transfer, DREI processes the
+                ;; gesture as activation/delimiter.
+                (let ((command nil))
+                  (block got-command
+                    (handler-bind
+                        ((accelerator-gesture
+                          (lambda (c)
+                            (let* ((event (accelerator-gesture-event c))
+                                   (cmd-table (frame-command-table frame))
+                                   (cmd (lookup-keystroke-command-item
+                                         event cmd-table
+                                         :numeric-arg
+                                         (accelerator-gesture-numeric-argument c))))
+                              (%diag "ACCELERATOR event=~S cmd=~S" event cmd)
+                              (when (typep cmd '(or symbol (cons symbol)))
+                                (setf from-accelerator t
+                                      command cmd)
+                                (return-from got-command))))))
+                      (setf command (read-frame-command frame :stream *standard-input*))))
+                  (%diag "GOT-COMMAND ~S" command)
+                  (when command
+                    (execute-frame-command frame command))
+                  ;; Redisplay after command execution
+                  (redisplay-frame-panes frame)
+                  (port-force-output port)))
+            (abort ()
+              :report "Return to command loop"
+              (setf from-accelerator nil)
+              nil)))))))
 
 ;;; Hook into redisplay to capture viewport sizes and pre-clear dirty panes.
 ;;; This ensures correct behavior regardless of which top-level loop is used

@@ -61,13 +61,11 @@
   (make-graft port)
   (push (make-instance 'charmed-frame-manager :port port)
         (port-frame-managers port))
-  ;; Start the I/O thread — this is the standard McCLIM mechanism used by
-  ;; CLX, SDL2, etc.  The thread loops calling process-next-event which
-  ;; reads terminal input, translates to McCLIM events, and distributes
-  ;; them to sheet event queues via distribute-event → dispatch-event →
-  ;; queue-append.  concurrent-queue's condition variables get signaled,
-  ;; waking the main thread's blocking queue-read calls.
-  (restart-port port))
+  ;; NOTE: Unlike GUI backends (CLX, SDL2), charmed does NOT start an I/O
+  ;; thread.  Terminal input is pumped synchronously on the main thread via
+  ;; simple-queue's process-next-event calls.  Running two threads reading
+  ;; from stdin corrupts multi-byte escape sequences (e.g. arrow keys).
+  )
 
 (defmethod destroy-port :before ((port charmed-port))
   (when (charmed-port-raw-mode-p port)
@@ -148,6 +146,15 @@
                   (port-force-output port))))))
         t))))
 
+(defun %port-diag (fmt &rest args)
+  "Write a diagnostic line to /tmp/charmed-diag.log."
+  (with-open-file (s "/tmp/charmed-diag.log"
+                     :direction :output
+                     :if-exists :append
+                     :if-does-not-exist :create)
+    (format s "~A ~?~%" (get-internal-real-time) fmt args)
+    (finish-output s)))
+
 ;;; Event processing - polls charmed for terminal input
 (defmethod process-next-event ((port charmed-port) &key wait-function (timeout nil))
   ;; This method runs on the port's I/O thread (via port-io-loop / restart-port).
@@ -164,27 +171,35 @@
   ;; Read terminal input with timeout.
   ;; When timeout is nil, block until an event arrives (loop internally).
   ;; When timeout is specified, poll once with that timeout.
-  (loop
-    (let* ((timeout-ms (if timeout
-                           (max 1 (round (* timeout 1000)))
-                           50))
-           (charmed-key (charmed:read-key-with-timeout timeout-ms)))
-      (cond
-        (charmed-key
-         (let ((event (translate-charmed-event port charmed-key)))
-           (when event
-             (distribute-event port event))
-           (return (if event t (values nil :timeout)))))
-        ((maybe-funcall wait-function)
-         (return (values nil :wait-function)))
-        (timeout
-         ;; Caller specified a timeout and it expired — return immediately.
-         (return (values nil :timeout)))
-        (t
-         ;; No timeout specified and no event yet — keep polling.
-         ;; Also check for resize while waiting.
-         (when (%detect-terminal-resize port)
-           (return t)))))))  ;; cond/let*/loop
+  (let ((logged-call (not (null timeout))))
+    (when logged-call
+      (%port-diag "PNE timeout=~S" timeout))
+    (loop
+      (let* ((timeout-ms (if timeout
+                             (max 1 (round (* timeout 1000)))
+                             50))
+             (charmed-key (charmed:read-key-with-timeout timeout-ms)))
+        (cond
+          (charmed-key
+           (when logged-call
+             (%port-diag "PNE GOT-KEY ~S" charmed-key))
+           (let ((event (translate-charmed-event port charmed-key)))
+             (when event
+               (%port-diag "PNE DISTRIBUTE event=~S to focus=~S"
+                           (type-of event)
+                           (pane-name (port-keyboard-input-focus port)))
+               (distribute-event port event))
+             (return (if event t (values nil :timeout)))))
+          ((maybe-funcall wait-function)
+           (return (values nil :wait-function)))
+          (timeout
+           ;; Caller specified a timeout and it expired — return immediately.
+           (return (values nil :timeout)))
+          (t
+           ;; No timeout specified and no event yet — keep polling.
+           ;; Also check for resize while waiting.
+           (when (%detect-terminal-resize port)
+             (return t))))))))  ;; cond/let*/loop
 
 ;;; Translate a charmed key-event into a McCLIM event
 

@@ -58,8 +58,8 @@
     ((medium charmed-medium) string &key text-style (start 0) end)
   (multiple-value-bind (width height x y baseline)
       (text-size medium string :text-style text-style :start start :end end)
-    (declare (ignore baseline))
-    (values x y (+ x width) (+ y height) width 0)))
+    (declare (ignore x y baseline))
+    (values 0 0 width height width 0)))
 
 ;;; Fallback metrics for basic-medium on charmed-port sheets.
 ;;; Without these, McCLIM's default pixel-based metrics cause wildly
@@ -97,8 +97,8 @@
   (if (charmed-port-medium-p medium)
       (multiple-value-bind (width height x y baseline)
           (text-size medium string :text-style text-style :start start :end end)
-        (declare (ignore baseline))
-        (values x y (+ x width) (+ y height) width 0))
+        (declare (ignore x y baseline))
+        (values 0 0 width height width 0))
       (call-next-method)))
 
 ;;; Helper to get the charmed screen from the medium's port
@@ -193,33 +193,19 @@
   (setf (gethash pane (charmed-port-scroll-offsets port)) value))
 
 (defun sheet-to-screen (medium x y)
-  "Transform sheet-space coordinates to screen coordinates using the frozen
-   viewport geometry captured before display (to avoid relayout drift).
-   Falls back to a parent-chain walk if no frozen geometry is available.
-   Applies the pane's scroll offset to the Y coordinate.
-   Also applies the medium-transformation to account for output-record offsets
-   used by DREI during accept prompts."
-  ;; Apply medium transformation to get coordinates in sheet space
-  (let ((tr (medium-transformation medium)))
-    (when tr
-      (multiple-value-setq (x y) (transform-position tr x y))))
+  "Transform drawing coordinates to terminal screen coordinates.
+   Uses medium-device-transformation (= sheet-native-transformation composed
+   with medium-transformation) to map from user coordinates all the way to
+   root/screen coordinates — the same approach the CLX backend uses.
+   Applies the pane's scroll offset to the Y coordinate."
   (let* ((sheet (medium-sheet medium))
          (port (port medium))
          (scroll-y (if (and port sheet)
                        (pane-scroll-offset port sheet)
                        0))
-         (vp (when (and port sheet)
-               (gethash sheet (charmed-port-viewport-sizes port)))))
-    (if vp
-        ;; Use frozen screen position from capture-pane-viewport-sizes
-        (let ((sx (first vp))
-              (sy (second vp)))
-          (values (+ sx x) (- (+ sy y) scroll-y)))
-        ;; Fallback: walk parent chain
-        (if sheet
-            (multiple-value-bind (ox oy) (sheet-screen-position sheet)
-              (values (+ ox x) (- (+ oy y) scroll-y)))
-            (values x (- y scroll-y))))))
+         (device-tr (medium-device-transformation medium)))
+    (multiple-value-bind (sx sy) (transform-position device-tr x y)
+      (values sx (- sy scroll-y)))))
 
 ;;; Viewport clipping - compute the visible screen region for a sheet
 
@@ -376,12 +362,19 @@
                 (update-terminal-cursor port)
                 (charmed-throttled-present port screen :force t)))))))))
 
+(defvar *draw-text-count* 0)
+
 (defmethod medium-draw-text* ((medium charmed-medium) string x y
                               start end
                               align-x align-y
                               toward-x toward-y transform-glyphs)
   (declare (ignore align-y toward-x toward-y transform-glyphs))
   (let ((screen (medium-screen medium)))
+    (when (and screen (< *draw-text-count* 3))
+      (%diag "DRAW-TEXT charmed-medium str=~S x=~S y=~S screen=~S"
+             (subseq (string string) (or start 0) (min (or end (length (string string))) 20))
+             x y screen))
+    (incf *draw-text-count*)
     (when screen
       (charmed-draw-text medium screen string x y start end align-x))))
 
@@ -389,12 +382,19 @@
 ;;; charmed screen.  This handles panes inside nested layout composites
 ;;; (e.g. hrack-pane) that get a basic-medium from McCLIM's standard
 ;;; framework instead of charmed-medium.
+(defvar *draw-text-around-count* 0)
+
 (defmethod medium-draw-text* :around ((medium basic-medium) string x y
                                       start end
                                       align-x align-y
                                       toward-x toward-y transform-glyphs)
   (let* ((sheet (medium-sheet medium))
          (port (when sheet (port sheet))))
+    (when (and port (typep port 'charmed-port) (< *draw-text-around-count* 3))
+      (%diag "DRAW-TEXT :around med=~S sheet=~S charmed-p=~S"
+             (type-of medium) (when sheet (pane-name sheet))
+             (typep medium 'charmed-medium))
+      (incf *draw-text-around-count*))
     (if (and port (typep port 'charmed-port)
              (not (typep medium 'charmed-medium)))
         (let ((screen (charmed-port-screen port)))

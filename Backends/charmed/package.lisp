@@ -9,6 +9,8 @@
            #:charmed-frame-manager
            #:charmed-frame-wants-raw-keys-p
            #:charmed-active-pane
+           ;; Terminal line input (bypasses DREI)
+           #:charmed-read-line
            ;; Startup helpers (Wave 6)
            #:run-frame-on-charmed
            #:run-frame-on-charmed-with-interactor))
