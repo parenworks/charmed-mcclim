@@ -929,9 +929,11 @@ accumulating sheet-transformation offsets.  Stops at grafts."
                   (%diag "GOT-COMMAND ~S" command)
                   (when command
                     (execute-frame-command frame command))
-                  ;; Redisplay after command execution
-                  (redisplay-frame-panes frame)
-                  (port-force-output port)))
+                  ;; Redisplay after command execution — skip when in raw-key
+                  ;; mode (browse/edit) since those manage their own display.
+                  (unless (charmed-frame-wants-raw-keys-p frame)
+                    (redisplay-frame-panes frame)
+                    (port-force-output port))))
             (abort ()
               :report "Return to command loop"
               (setf from-accelerator nil)
